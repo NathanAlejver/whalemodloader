@@ -27,15 +27,14 @@ WML works by **patching files** while keeping the original ones as a backup. It 
 3. Subscribe any **[ModLoader]** workshop item and refresh WML *(F5 or "Refresh mod list" button).*
 4. RUN again to patch.
 
-📌 If you want to quickly check how it works, you can subscribe my simple mod: ["More Empty Chests"](https://steamcommunity.com/sharedfiles/filedetails/?id=3535794729). If you can buy, well, more empty chests in a bank, it means WML works! 
-📌 Each time you install or remove a mod, **you should RUN ModLoader to update your game files. **You should do it aswell if game version changes.
+📌 If you want to quickly check how it works, you can subscribe my simple mod: ["More Empty Chests"](https://steamcommunity.com/sharedfiles/filedetails/?id=3535794729). If you can buy, well, more empty chests in a bank, it means WML works!
 
+📌 Each time you install or remove a mod, **you should RUN ModLoader to update your game files.** You should do it aswell if game version changes.
 
+📌 Contact and support: [Discord Server](https://discord.gg/GnsUpqNDv7)
 
-## About me
+### About me
 Game dev, 3D artist and horror writer. I love exploring Beauty hidden in darkest shadows. I believe art should serve people, not art itself nor artist’s ego – because it’s all about making us a better person. I hope this little mod loader, while not being art, will help you get even more out of **Caribbean Legend.**
-
-Contact: [Discord Server](https://discord.gg/GnsUpqNDv7)
 
 Check out my other projects:
 - [Artstation](https://nathanalejver.artstation.com/)
