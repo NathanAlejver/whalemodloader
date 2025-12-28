@@ -1,16 +1,26 @@
 
+from __future__ import annotations
 import re, sys, json, types, shutil, importlib.util
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any, Optional
 
+
 # =====================================
 #           PATHS & CONSTANTS
 # =====================================
 
-script_dir = Path(__file__).resolve().parent
-game_root = script_dir.parent
-mods_dir = script_dir / "mods"
+def get_app_dir() -> Path:
+    # .exe launch
+    if getattr(sys, 'frozen', False): 
+        return Path(sys.executable).resolve().parent
+     # .py launch
+    else:
+        return Path(__file__).resolve().parent
+APP_DIR = get_app_dir()
+
+game_root = APP_DIR.parent
+mods_dir = APP_DIR / "mods"
 
 NAME = "Whale Mod Loader"
 AUTHOR = 'NathanAlejver'
@@ -23,10 +33,13 @@ FOLDER_NAME = "WhaleModLoader"
 FACTORY_RESET = False # switched automatically by gui
 PURGE_BACKUPS_ONLY = False # switched automatically by gui
 
-BACKUP_DIR = script_dir / "assets" / "backups" / "original_game_files"
+BACKUP_DIR = APP_DIR / "assets" / "backups" / "original_game_files"
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 ERROR_COUNT = 0
 WARN_COUNT = 0
+
+
+
 
 # =====================================
 #               LOGGING
@@ -40,13 +53,16 @@ def log(msg: str) -> None:
     if "[ERROR]" in msg:     ERROR_COUNT += 1        
     if "[WARN]" in msg:      WARN_COUNT += 1
 
+
+
+
 # =====================================
 #   MOD DISCOVERY + MANIFEST LOADING
 # =====================================
 
 # Returns mods (datapacks) from /mods/ folder and Workshop subfolders.
-def discover_all_mods(local_mods_root: Path, ws_root: Optional[Path]) -> List[Mod]:
-    mods: List[Mod] = []
+def discover_all_mods(local_mods_root: Path, ws_root: Optional[Path]) -> List["Mod"]:
+    mods: List["Mod"] = []
 
     # 1) Local mods
     local_mods = discover_mods(local_mods_root)
@@ -111,8 +127,8 @@ class Mod:
         return str(self.meta.get("name") or self.dir_name)
 
 # Find mods that contain a manifest.json with basic metadata.
-def discover_mods(mods_root: Path) -> List[Mod]:
-    mods: List[Mod] = []
+def discover_mods(mods_root: Path) -> List["Mod"]:
+    mods: List["Mod"] = []
     if not mods_root.exists():
         return mods
 

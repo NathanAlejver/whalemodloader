@@ -19,8 +19,24 @@ from PIL import Image, ImageTk, ImageFilter, ImageOps
 
 Titlebar.ensure_appid("ModLoaderGUI")
 
-HERE = Path(__file__).resolve().parent / "assets" / "settings"
+ModLoader = _import_modloader()
+
+# Paths
+def get_app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        # running as PyInstaller .exe
+        return Path(sys.executable).resolve().parent
+    else:
+        # running as plain .py
+        return Path(__file__).resolve().parent
+APP_DIR = get_app_dir()
+HERE = APP_DIR / "assets" / "settings"
 SETTINGS_PATH = HERE / ".gui_modloader_settings.json"
+
+
+
+
+
 
 FONT_TITLE_H1    = FONTS["title_h1"]
 FONT_TITLE_H2    = FONTS["title_h2"]
@@ -537,7 +553,7 @@ class ModLoaderApp(tk.Tk):
     def _load_logo(self, target_h: int = 96, method: str = "bicubic", supersample: float = 1.0, preblur: float = 0.0, unsharp: float = 0.0):
         self._logo_img = None
         self._logo_w = self._logo_h = 0
-        icons_dir = Path(__file__).resolve().parent / "assets" / "icons"
+        icons_dir = APP_DIR / "assets" / "icons"
         p = icons_dir / "logo.png"
         if not p.exists():
             return
@@ -920,7 +936,10 @@ class ModLoaderApp(tk.Tk):
             pass
 
         try:
-            os.chdir(Path(ModLoader.__file__).resolve().parent)
+            base_dir = getattr(ModLoader, "APP_DIR", None)
+            if base_dir is None:
+                base_dir = Path(ModLoader.__file__).resolve().parent
+            os.chdir(Path(base_dir))
         except Exception:
             pass
 
@@ -960,12 +979,27 @@ class ModLoaderApp(tk.Tk):
 
     # ---------- Actions ----------
     def open_mods_folder(self):
+        
+        
+        #try:
+        #    ModLoader = _import_modloader()
+        #    mods_dir = Path(ModLoader.__file__).resolve().parent / "mods"
+        #except Exception:
+        #    mods_dir = HERE / "mods"
+        #mods_dir.mkdir(parents=True, exist_ok=True)
+        
         try:
             ModLoader = _import_modloader()
-            mods_dir = Path(ModLoader.__file__).resolve().parent / "mods"
+            base_dir = getattr(ModLoader, "APP_DIR", None)
+            if base_dir is None:
+                base_dir = Path(ModLoader.__file__).resolve().parent
+            base_dir = Path(base_dir)
         except Exception:
-            mods_dir = HERE / "mods"
+            base_dir = APP_DIR
+
+        mods_dir = base_dir / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
+        
         try:
             if sys.platform.startswith("win"):
                 os.startfile(str(mods_dir))  # type: ignore[attr-defined]

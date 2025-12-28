@@ -17,6 +17,10 @@ from weakref import WeakSet
 import ctypes as ct
 from ctypes import wintypes
 import sys, time, weakref, threading
+from PIL import Image, ImageTk, ImageFilter
+
+
+
 
 HERE = Path(__file__).resolve().parent
 
@@ -1035,6 +1039,7 @@ class Icon:
     BASE_DIR = Path(__file__).resolve().parent / "assets" / "icons"
     TEX = {
         "add": "add.png",
+        "create": "create.png",
         "edit": "edit.png",
         "file": "file.png",
         "folder": "folder.png",
@@ -1093,7 +1098,7 @@ class Icon:
                 for l in list(cls._BG_REGISTRY.get(mid, ())):
                     try: l.configure(bg=color)
                     except Exception: dead.append(l)
-                # cleanup martwych referencji
+                # cleanup of dead references
                 for l in dead:
                     try: cls._BG_REGISTRY[mid].discard(l)
                     except Exception: pass
@@ -1126,8 +1131,7 @@ class Icon:
         key = f"{name}{ICON_INACTIVE_SUFFIX if inactive else ''}@{size}"
         if key in Icon._CACHE:
             return Icon._CACHE[key]
-
-        # wybór pliku: priorytet inactive jeśli istnieje, inaczej podstawowy
+        # file selection: priority inactive if present, otherwise basic
         filename = None
         if inactive:
             cand = Icon.TEX.get(f"{name}{ICON_INACTIVE_SUFFIX}")
@@ -1142,11 +1146,17 @@ class Icon:
             filename = Icon.TEX.get(name, f"{name}.png")
 
         path = (Icon.BASE_DIR / filename).resolve()
-        try:
-            tk_img = tk.PhotoImage(file=str(path))
-            if tk_img.width() > size:
-                factor = max(1, int(round(tk_img.width() / size)))
-                tk_img = tk_img.subsample(factor, factor)
+        try:            
+            img = Image.open(path).convert("RGBA")
+            if img.size != (size, size):
+                img.thumbnail((size, size), Image.Resampling.LANCZOS)
+                canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                x = (size - img.width) // 2
+                y = (size - img.height) // 2
+                canvas.paste(img, (x, y))
+                img = canvas     
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=120, threshold=8))  
+            tk_img = ImageTk.PhotoImage(img)
         except Exception:
             tk_img = tk.PhotoImage(width=1, height=1)
 

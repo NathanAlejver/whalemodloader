@@ -38,6 +38,8 @@ FONT_BASE        = FONTS["base"]
 FONT_BASE_BOLD   = FONTS["base_bold"]
 FONT_BASE_MINI   = FONTS["base_mini"]
 
+META_FG          = COLOR["meta"]
+
 # ---- Spacing ----
 CARD_OUTER_VPAD   = 12
 CARD_INNER_PAD    = 14
@@ -327,11 +329,23 @@ class ReplacementsBrowser:
         s.configure("Card.TFrame", background=C_CARD, borderwidth=0, relief="flat")
         s.configure("Card.TLabel",  background=C_CARD, foreground=C_TEXT, font=BASE)
 
-        # game_root from ModLoader.script_dir (one level up)
+        # game_root from ModLoader (shared between GUI / CLI / exe)
         try:
-            from ModLoader import script_dir as _SCRIPT_DIR  # type: ignore
-            self.game_root = Path(_SCRIPT_DIR).resolve().parent
+            import ModLoader
+
+            # Prefer explicit game_root set in ModLoader
+            base_dir = getattr(ModLoader, "game_root", None)
+
+            if base_dir is None:
+                # Fallback: APP_DIR one level up
+                app_dir = getattr(ModLoader, "APP_DIR", None)
+                if app_dir is None:
+                    app_dir = Path(ModLoader.__file__).resolve().parent
+                base_dir = Path(app_dir).parent
+
+            self.game_root = Path(base_dir).resolve()
         except Exception:
+            # Fallback – parent of current working directory
             self.game_root = Path.cwd().resolve().parent
 
         # load payload
@@ -410,19 +424,43 @@ class ReplacementsBrowser:
                 try: ch.destroy()
                 except Exception: pass
 
-        header = ttk.Frame(self.root, padding=(4, 8), style="Panel.TFrame")
+        header = ttk.Frame(self.root, padding=(0, 0), style="Panel.TFrame")
         header.pack(fill="x")
 
-        # Header
-        ttk.Label(header, text="Replacements", font=FONT_TITLE_H1, style="Panel.TFrame").pack(side="left")
-        
-        self.e_search = PlaceholderEntry(header, "Filter files/functions...")
-        self.e_search.pack(side="left", fill="x", expand=True, padx=(0,6))
-        self.e_search.bind("<KeyRelease>", lambda e: self._rebuild_cards())            
+        row_title = ttk.Frame(header, style="Panel.TFrame")
+        row_title.pack(fill="x")
 
-        # Add icon
-        Icon.Button(header, "add", command=self._add_entry,
-            tooltip="Add file entry",pack={"side": "right", "padx": (6, 6)})
+        row_tips = ttk.Frame(header, style="Panel.TFrame")
+        row_tips.pack(fill="x", pady=(0, 0))
+
+        row_controls = ttk.Frame(header, style="Panel.TFrame")
+        row_controls.pack(fill="x", padx=(4,0), pady=(8, 12))
+
+        # 1) Title
+        ttk.Label(row_title, text="Replacements", font=FONT_TITLE_H1).pack(side="left")
+        
+        # 2) Tips
+        tips = ttk.Label(
+            row_tips,
+            text="Here are all the game files that this mod changed. Each “card” shows exactly what was modified, as well as a list of functions that were affected.",
+            foreground=META_FG,
+            font=FONT_BASE_MINI,
+            justify="left"
+        )
+        tips.pack(fill="x", anchor="w")
+        
+        # wrap tips
+        def _update_wrap(event=None):
+            w = max(200, row_tips.winfo_width() - 12)
+            tips.configure(wraplength=w)
+        row_tips.bind("<Configure>", _update_wrap)
+        _update_wrap()
+
+        # 3) Search + button
+        self.e_search = PlaceholderEntry(row_controls, "Filter files/functions...")
+        self.e_search.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.e_search.bind("<KeyRelease>", lambda e: self._rebuild_cards())
+        Icon.Button(row_controls, "add", command=self._add_entry, tooltip="Add file entry", pack={"side": "right", "padx": (6, 6)})
             
         # Scroll area
         outer = Scrollable(self.root, bg=C_BG)

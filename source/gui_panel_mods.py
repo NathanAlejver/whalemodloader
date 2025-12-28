@@ -4,7 +4,7 @@
 from __future__ import annotations
 import re, sys, json, types, shutil, importlib.util
 from gui_common import _import_modloader, style_scrollbar, COLOR_PALETTE as COLOR, ICON_SIZE, FONTS
-from gui_common import Tooltip, Button, Scrollable, Icon, HSeparator, Window, Titlebar
+from gui_common import Tooltip, Button, Scrollable, Icon, HSeparator, Window, Titlebar, PlaceholderEntry
 import os
 import webbrowser
 from pathlib import Path
@@ -133,8 +133,8 @@ class ModsPanel(ttk.Frame):
         ttk.Label(title_row, text="Mods", font=FONT_TITLE_H1).pack(side=tk.LEFT)
 
         # Add Icon
-        Icon.Button(title_row, "add", size=int(ICON_SIZE*0.8), command=self.add_new_mod,
-                    tooltip="Create a new mod (Ctrl+N)", pack={"side":"left", "padx":(12, 0)})
+        Icon.Button(title_row, "create", size=int(ICON_SIZE*1), command=self.add_new_mod,
+                    tooltip="Create a new mod (Ctrl+N)", pack={"side":"left", "padx":(6, 0)})
 
         # Buttons
         def btn_grid(btn_column): return {"row": 0, "column": btn_column, "padx": (6, 0)}
@@ -143,7 +143,7 @@ class ModsPanel(ttk.Frame):
         Button(top, text="Disable All", command=lambda: self._set_all(False), grid=btn_grid(3), tooltip="Make all mods inactive")
         
         # Tips
-        ttk.Label(top, text="Tip: drag cards to reorder  •  Click title to expand/collapse",
+        ttk.Label(top, text="All mods located in the /mods/ directory will appear here (after refreshing).\nTip: drag cards to reorder  •  Click title to expand/collapse",
                   foreground=META_FG, font=FONT_BASE_MINI)\
             .grid(row=1, column=0, columnspan=4, sticky="w", pady=(18, 0))
 
@@ -191,8 +191,15 @@ class ModsPanel(ttk.Frame):
     def _get_mods_dir(self) -> Path:
         try:
             ModLoader = _import_modloader()
-            return Path(ModLoader.__file__).resolve().parent / "mods"
+
+            # Prefer shared APP_DIR from ModLoader
+            base_dir = getattr(ModLoader, "APP_DIR", None)
+            if base_dir is None:
+                base_dir = Path(ModLoader.__file__).resolve().parent
+
+            return Path(base_dir) / "mods"
         except Exception:
+            # Fallback na "standalone" uruchomienie .py
             return Path(__file__).resolve().parent / "mods"
 
     def _on_frame_configure(self):
@@ -319,7 +326,7 @@ class ModsPanel(ttk.Frame):
                 # top-level workshop folders (each Steam item)
                 roots.append((ws_root, "Workshop"))
 
-                # optional nested NathansMods/mods per workshop item
+                # optional nested WhaleModLoader/mods per workshop item
                 try:
                     for child in sorted(ws_root.iterdir()):
                         if not child.is_dir():
@@ -821,7 +828,7 @@ class ModsPanel(ttk.Frame):
     def add_new_mod(self):
         win = tk.Toplevel(self)
         win.withdraw()
-        win.title("Add new mod")
+        win.title("Create new mod")
         win.configure(bg=self.palette["panel"])
         win.geometry("700x600")
         parent = self.winfo_toplevel()
@@ -834,40 +841,56 @@ class ModsPanel(ttk.Frame):
         frm = ttk.Frame(win, padding=12, style="Panel.TFrame"); frm.pack(fill=tk.BOTH, expand=True)
         for i in range(2): frm.columnconfigure(i, weight=1 if i == 1 else 0)
 
-        def dark_entry(parent):
-            return tk.Entry(parent, bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
-                            relief="flat", highlightthickness=1, highlightbackground="#18334d")
+        def dark_entry(parent, desc):
+            return PlaceholderEntry(parent, desc)
+        
+        
 
+        # Tips
+        tips = ttk.Label(frm, text="Make your mod with ease!\nHere you can create the basic frame of your mod. Fill in this fields so it can appear on the mod list.\nLater, you’ll be able to edit it using the mod editor.",
+                  foreground=META_FG, font=FONT_BASE_MINI, justify="left")               
+        tips.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 10))
+        
         # Fields
-        ttk.Label(frm, text="Name:").grid(row=0, column=0, sticky="w", pady=(4, 4))
-        e_name = dark_entry(frm); e_name.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(frm, text="Name:").grid(row=1, column=0, sticky="w", pady=(4, 4))
+        e_name = dark_entry(frm, "Enter mod name..."); e_name.grid(row=1, column=1, sticky="ew", padx=(8, 0))
 
-        ttk.Label(frm, text="Game version:").grid(row=1, column=0, sticky="w", pady=(4, 4))
-        e_game = dark_entry(frm); e_game.grid(row=1, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(frm, text="Game version:").grid(row=2, column=0, sticky="w", pady=(4, 4))
+        e_game = dark_entry(frm, "Enter current game version (although it doesn't really matter)..."); e_game.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(4,4))
 
-        ttk.Label(frm, text="Mod version:").grid(row=2, column=0, sticky="w", pady=(4, 4))
-        e_mod = dark_entry(frm); e_mod.grid(row=2, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(frm, text="Mod version:").grid(row=3, column=0, sticky="w", pady=(4, 4))
+        e_mod = dark_entry(frm, "eg. 1.0"); e_mod.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(4,4))
 
-        ttk.Label(frm, text="Link (URL):").grid(row=3, column=0, sticky="w", pady=(8, 4))
-        e_link = dark_entry(frm); e_link.grid(row=3, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(frm, text="Link (URL):").grid(row=4, column=0, sticky="w", pady=(8, 4))
+        e_link = dark_entry(frm, "Enter your Steam Workshop link, or GitHub link..."); e_link.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(4,4))
 
-        ttk.Label(frm, text="Author:").grid(row=4, column=0, sticky="w", pady=(4, 4))
-        e_author = dark_entry(frm); e_author.grid(row=4, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(frm, text="Author:").grid(row=5, column=0, sticky="w", pady=(4, 4))
+        e_author = dark_entry(frm, "Enter... you..."); e_author.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(4,4))
 
-        ttk.Label(frm, text="Description:").grid(row=5, column=0, sticky="nw", pady=(8, 4))
+        ttk.Label(frm, text="Description:").grid(row=6, column=0, sticky="nw", pady=(8, 4))
         txt_desc = tk.Text(frm, height=6, wrap="word", bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
                            relief="flat", highlightthickness=1, highlightbackground="#18334d")
-        txt_desc.grid(row=5, column=1, sticky="nsew", padx=(8, 0))
+        txt_desc.grid(row=6, column=1, sticky="nsew", padx=(8, 0), pady=(4,4))
 
-        ttk.Label(frm, text="Changes:").grid(row=6, column=0, sticky="nw", pady=(8, 4))
+        ttk.Label(frm, text="Changes:").grid(row=7, column=0, sticky="nw", pady=(8, 4))
         txt_changes = tk.Text(frm, height=8, wrap="word", bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
                               relief="flat", highlightthickness=1, highlightbackground="#18334d")
-        txt_changes.grid(row=6, column=1, sticky="nsew", padx=(8, 0))
-        frm.rowconfigure(6, weight=1)
+        txt_changes.grid(row=7, column=1, sticky="nsew", padx=(8, 0), pady=(4,4))
+        frm.rowconfigure(7, weight=1)
 
         hint = ttk.Label(frm, text="In your 'changes' write one item per line.",
-                         foreground="#9fb7d9")
-        hint.grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
+                         foreground=META_FG, font=FONT_BASE_MINI, justify="left")
+        hint.grid(row=8, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+
+        # Wrap text
+        def _update_wrap(event=None):
+            w = max(200, frm.winfo_width() - 24) # margin
+            tips.configure(wraplength=w)
+            hint.configure(wraplength=w)
+        frm.bind("<Configure>", _update_wrap)
+        _update_wrap()
+
+
 
         btns = ttk.Frame(win, padding=(12, 8), style="Panel.TFrame"); btns.pack(fill=tk.X)
         btns.columnconfigure(0, weight=1)
@@ -875,7 +898,7 @@ class ModsPanel(ttk.Frame):
         def _save_and_close():
             name = e_name.get().strip()
             if not name:
-                messagebox.showerror("Add new mod", "Name cannot be empty."); return
+                messagebox.showerror("Create new mod", "Name cannot be empty."); return
 
             # prepare the folder ./mods/<name>
             dir_name = self._sanitize_dir(name)
@@ -887,7 +910,7 @@ class ModsPanel(ttk.Frame):
             try:
                 target.mkdir(parents=True, exist_ok=False)
             except Exception as e:
-                messagebox.showerror("Add new mod", f"Failed to create folder:\n{e}")
+                messagebox.showerror("Create new mod", f"Failed to create folder:\n{e}")
                 return
 
             # manifest
@@ -915,7 +938,7 @@ class ModsPanel(ttk.Frame):
             try:
                 (target / "manifest.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             except Exception as e:
-                messagebox.showerror("Add new mod", f"Failed to save the manifest:\n{e}")
+                messagebox.showerror("Create new mod", f"Failed to save the manifest:\n{e}")
                 return
 
             win.destroy()
@@ -1082,33 +1105,57 @@ class ModsPanel(ttk.Frame):
             return tk.Entry(parent, bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
                             relief="flat", highlightthickness=1, highlightbackground="#18334d")
 
-        ttk.Label(left, text="Name:").grid(row=0, column=0, sticky="w", pady=(4, 4))
-        e_name = dark_entry(left); e_name.insert(0, name_val); e_name.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        ttk.Label(left, text="Game version:").grid(row=1, column=0, sticky="w", pady=(4, 4))
-        e_game = dark_entry(left); e_game.insert(0, game_ver_val); e_game.grid(row=1, column=1, sticky="ew", padx=(8, 0))
+        # Title
+        title_row = tk.Frame(left, bg=self.bg, bd=0, highlightthickness=0)
+        title_row.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Label(title_row, text="Mod manifest", font=FONT_TITLE_H1).pack(side=tk.LEFT)
+        
+        # Tips
+        tips = ttk.Label(left, text="General information about the mod. You can edit it if you want to change the manifest (but make sure you know what you’re doing).",
+                  foreground=META_FG, font=FONT_BASE_MINI, justify="left")               
+        tips.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
 
-        ttk.Label(left, text="Mod version:").grid(row=2, column=0, sticky="w", pady=(4, 4))
-        e_mod = dark_entry(left); e_mod.insert(0, mod_ver_val); e_mod.grid(row=2, column=1, sticky="ew", padx=(8, 0))
+        # Fields
+        ttk.Label(left, text="Name:").grid(row=2, column=0, sticky="w", pady=(4, 4))
+        e_name = dark_entry(left); e_name.insert(0, name_val); e_name.grid(row=2, column=1, sticky="ew", padx=(8, 0))
 
-        ttk.Label(left, text="Link (URL):").grid(row=3, column=0, sticky="w", pady=(8, 4))
-        e_link = dark_entry(left); e_link.insert(0, link_val); e_link.grid(row=3, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(left, text="Game version:").grid(row=3, column=0, sticky="w", pady=(4, 4))
+        e_game = dark_entry(left); e_game.insert(0, game_ver_val); e_game.grid(row=3, column=1, sticky="ew", padx=(8, 0))
 
-        ttk.Label(left, text="Author:").grid(row=4, column=0, sticky="w", pady=(4, 4))
-        e_author = dark_entry(left); e_author.insert(0, author_val); e_author.grid(row=4, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(left, text="Mod version:").grid(row=4, column=0, sticky="w", pady=(4, 4))
+        e_mod = dark_entry(left); e_mod.insert(0, mod_ver_val); e_mod.grid(row=4, column=1, sticky="ew", padx=(8, 0))
 
-        ttk.Label(left, text="Description:").grid(row=5, column=0, sticky="nw", pady=(8, 4))
+        ttk.Label(left, text="Link (URL):").grid(row=5, column=0, sticky="w", pady=(8, 4))
+        e_link = dark_entry(left); e_link.insert(0, link_val); e_link.grid(row=5, column=1, sticky="ew", padx=(8, 0))
+
+        ttk.Label(left, text="Author:").grid(row=6, column=0, sticky="w", pady=(4, 4))
+        e_author = dark_entry(left); e_author.insert(0, author_val); e_author.grid(row=6, column=1, sticky="ew", padx=(8, 0))
+
+        ttk.Label(left, text="Description:").grid(row=7, column=0, sticky="nw", pady=(8, 4))
         txt_desc = tk.Text(left, height=6, wrap="word", bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
                            relief="flat", highlightthickness=1, highlightbackground="#18334d")
-        txt_desc.insert("1.0", desc_val); txt_desc.grid(row=5, column=1, sticky="nsew", padx=(8, 0))
+        txt_desc.insert("1.0", desc_val); txt_desc.grid(row=7, column=1, sticky="nsew", padx=(8, 0))
 
-        ttk.Label(left, text="Changes:").grid(row=6, column=0, sticky="nw", pady=(8, 4))
+        ttk.Label(left, text="Changes:").grid(row=8, column=0, sticky="nw", pady=(8, 4))
         txt_changes = tk.Text(left, height=8, wrap="word", bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
                               relief="flat", highlightthickness=1, highlightbackground="#18334d")
-        txt_changes.insert("1.0", changes_val); txt_changes.grid(row=6, column=1, sticky="nsew", padx=(8, 0))
-        ttk.Label(left, text="  In your 'changes' write one item per line.",
-                  foreground="#9fb7d9").grid(row=7, column=1, columnspan=2, sticky="ew", pady=(8, 0))
-        left.rowconfigure(6, weight=1)
+        txt_changes.insert("1.0", changes_val)
+        txt_changes.grid(row=8, column=1, sticky="nsew", padx=(8, 0))
+        
+        # Hint
+        hint = ttk.Label(left, text="In your 'changes' write one item per line.", foreground=META_FG, font=FONT_BASE_MINI, justify="left")       
+        hint.grid(row=9, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        
+        left.rowconfigure(8, weight=1)        
+        
+        # Wrap text
+        def _update_wrap(event=None):
+            w = max(200, left.winfo_width() - 24) # margin
+            tips.configure(wraplength=w)
+            hint.configure(wraplength=w)
+        left.bind("<Configure>", _update_wrap)
+        _update_wrap()
 
         # ========== RIGHT: Replacements ==========
         right = ttk.Frame(paned, padding=12)

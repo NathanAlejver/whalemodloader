@@ -203,6 +203,17 @@ def mk_entry(parent):
                     highlightthickness=1, highlightbackground=C_INPUT_BD,
                     relief="flat", bd=0, font=FONT_MONO)
 
+def add_tip(top: tk.Misc, text: str, pady=(6, 10), padx=0):
+    lbl = tk.Label(top,text=text, bg=C_BG, fg=C_SUB, font=FONT_BASE_MINI, justify="left", anchor="w", wraplength=10)
+    lbl.pack(fill="x", padx=padx, pady=pady)
+
+    def _wrap(_e=None):
+        w = max(200, top.winfo_width() - 24)
+        lbl.configure(wraplength=w)
+
+    top.bind("<Configure>", _wrap, add="+")
+    _wrap()
+    return lbl
 
 # ====== Cards ======
 class FunctionCard(tk.Frame):
@@ -349,8 +360,16 @@ class EditorLineRepl(ttk.Frame):
 
         # title
         top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=3, sticky="ew")
-        tk.Label(top, text="Replace function lines", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(top, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        hdr = tk.Frame(top, bg=C_BG)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Replace function lines", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
+        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+
+        add_tip(
+            top, "Here you can override individual lines within a function. It works by surgically swapping vanilla code for your new version. "
+            "On the left, you can add a specific function you want to edit, and on the right, individual entries (a pair of old and new code). "
+            "Remember: for the changes to apply, the vanilla code entry must be identical to the original one!"
+        )
 
         # columns
         self.grid_rowconfigure(1, weight=1)
@@ -808,8 +827,16 @@ class EditorFunctionMappings(ttk.Frame):
         self._hist: List[Tuple[str, tuple]] = []; self._redo: List[Tuple[str, tuple]] = []; self._replaying=False
 
         top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=3, sticky="ew")        
-        tk.Label(top, text="Replace functions", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(top, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        hdr = tk.Frame(top, bg=C_BG)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Replace functions", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
+        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")        
+        add_tip(top,
+                "This panel lets you replace entire functions (instead of individual lines of code). "
+                "It's an easy and fast solution, but keep in mind it limits compatibility potential. "
+                "Use this option wisely (e.g., when your changes affect most of the function)."
+                )
+
 
         self.grid_rowconfigure(1, weight=1); self.grid_columnconfigure(2, weight=1)
 
@@ -1028,9 +1055,16 @@ class EditorGeneralPairs(ttk.Frame):
         self._idx: Optional[int]=None
         self._hist: List[Tuple[str, tuple]]=[]; self._redo: List[Tuple[str, tuple]]=[]; self._replaying=False
 
-        top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=2, sticky="ew")       
-        tk.Label(top, text="Replace general lines", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(top, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=2, sticky="ew")             
+        hdr = tk.Frame(top, bg=C_BG)
+        hdr.pack(fill="x")  
+        tk.Label(hdr, text="Replace general lines", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
+        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")        
+        add_tip(
+            top,
+            "Here you can replace lines of code which are outside of any function, e.g., when you want to change a declared variable. "
+            "Use this option only when the standard 'Function lines' isn't enough."
+        )
 
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
 
@@ -1293,9 +1327,16 @@ class EditorAdditions(ttk.Frame):
         self._idx: Optional[int]=None
         self._hist: List[Tuple[str, tuple]]=[]; self._redo: List[Tuple[str, tuple]]=[]; self._replaying=False
 
-        top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=2, sticky="ew")
-        tk.Label(top, text="File additions", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(top, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=2, sticky="ew")         
+        hdr = tk.Frame(top, bg=C_BG)
+        hdr.pack(fill="x")  
+        tk.Label(hdr, text="File additions", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
+        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        add_tip(
+            top,
+            "This panel lets you add a new snippet of code at the beginning or the end of the file (which you can choose using the option below). "
+            "This allows you to add new variables or functions you simply want to append to the code."
+        )
 
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
 
@@ -1504,12 +1545,21 @@ class EditorFileMap(ttk.Frame):
         self.columnconfigure(1, weight=1)   
         
         top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=2, sticky="ew")     
-        tk.Label(top, text="Replace whole files", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(top, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        hdr = tk.Frame(top, bg=C_BG)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Replace whole files", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
+        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        
         
         ttk.Label(self, text="Replacement filename:", font=FONT_BASE_BOLD).grid(row=1, column=0, sticky="e", pady=(10,0))        
         self.e = PlaceholderEntry(self, "e.g. cabin.c (no path!)")
         self.e.grid(row=1, column=1, sticky="ew", padx=(6,0), pady=(10,0))
+        add_tip(
+            top,
+            "A panel for the most drastic code swap — a completele replacement of the file. "
+            "It't not recommended to use this option, as it makes the whole file incompatible with other mods. But sometimes it's useful when there's just no other way "
+            "(e.g., replacing complex .ini files). Use it with caution!"
+        )
         
         # Button
         def btn_grid(btn_row, btn_column): return {"row": btn_row, "column": btn_column, "padx": (6, 0), "pady": (10,0)}
