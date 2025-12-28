@@ -22,13 +22,13 @@ WML works by **patching files** while keeping the original ones as a backup. It 
 ⚠️ *Before installation, make sure to **VERIFY YOUR STEAM FILES!** You need to have clear game installation (Vanilla + Workshop Mods)* ⚠️ 
 
 1. Download [the latest release](https://github.com/NathanAlejver/whalemodloader/releases/)
-1. Unpack and place "WhaleModLoader" directly **into game directory.** *(steamapps\common\Caribbean Legend/)*
-2. Launch and click "RUN Modloader", as the first run creates vanilla backup files.
+1. Unpack and place "WhaleModLoader" folder directly **into game room directory.** *(steamapps/common/Caribbean Legend/)*
+2. Launch .exe and click "RUN Modloader", as the first run creates vanilla backup files.
 3. Subscribe any **[ModLoader]** workshop item and refresh WML *(F5 or "Refresh mod list" button).*
 4. RUN again to patch.
 
-
-Each time you install or remove a mod, you should run run Mod Loader to update your game files. You should do it aswell if game version updates.
+📌 If you want to quickly check how it works, you can subscribe my simple mod: ["More Empty Chests"](https://steamcommunity.com/sharedfiles/filedetails/?id=3535794729). If you can buy, well, more empty chests in a bank, it means WML works! 
+📌 Each time you install or remove a mod, **you should RUN ModLoader to update your game files. **You should do it aswell if game version changes.
 
 
 
