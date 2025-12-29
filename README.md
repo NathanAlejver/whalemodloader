@@ -27,7 +27,7 @@ WML works by **patching files** while keeping the original ones as a backup. It 
 3. Subscribe any **[ModLoader]** workshop item and refresh WML *(F5 or "Refresh mod list" button).*
 4. RUN again to patch.
 
-📌 If you want to quickly check how it works, you can subscribe my simple [Time Scale Mod](https://steamcommunity.com/sharedfiles/filedetails/?id=3634002757). If you can buy, well, more empty chests in a bank, it means WML works!
+📌 If you want to quickly check how it works, you can subscribe my simple [Time Scale Mod](https://steamcommunity.com/sharedfiles/filedetails/?id=3634002757). If you can speed your game up to x8/x12, it means WML works!
 
 📌 Each time you install or remove a mod, **you should RUN ModLoader to update your game files.** You should do it aswell if game version changes.
 
