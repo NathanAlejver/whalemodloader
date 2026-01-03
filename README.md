@@ -40,9 +40,9 @@ WML works by **patching files** while keeping the original ones as a backup. It 
 * [Bigger Squadron](https://steamcommunity.com/sharedfiles/filedetails/?id=3544584430)
 * [Time Scale Mod](https://steamcommunity.com/sharedfiles/filedetails/?id=3634002757)
 * [Skip Intro Movies](https://steamcommunity.com/sharedfiles/filedetails/?id=3634304321)
+* [More Vanguards](https://steamcommunity.com/sharedfiles/filedetails/?id=3637834490)
 
 Coming soom:
-* More Vanguards (up to 5 fighters)
 * Worldmap Expansions (new Islands: Providence, Bonaire and more in the future)
 
 
