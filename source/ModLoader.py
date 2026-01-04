@@ -19,15 +19,19 @@ def get_app_dir() -> Path:
         return Path(__file__).resolve().parent
 APP_DIR = get_app_dir()
 
+
 game_root = APP_DIR.parent
 mods_dir = APP_DIR / "mods"
+settings_dir = APP_DIR / "settings"
 
 NAME = "Whale Mod Loader"
 AUTHOR = 'NathanAlejver'
-VERSION = 'BETA'
+VERSION = 'BETA 0.1'
 
 WORKSHOP_GAME_ID = '2230980'
 STEAM_URL = "steam://rungameid/" + WORKSHOP_GAME_ID
+
+    
 FOLDER_NAME = "WhaleModLoader"
 
 FACTORY_RESET = False # switched automatically by gui
@@ -88,18 +92,38 @@ def discover_all_mods(local_mods_root: Path, ws_root: Optional[Path]) -> List["M
                     m.meta.setdefault("origin", f"workshop:{child.name}")
                 mods.extend(nested_mods)
                 
-    # 4) Remove duplicates (by base folder + directory name)
+    # Remove duplicates (by base folder + directory name)
     unique: Dict[Tuple[Path, str], Mod] = {}
     for m in mods:
         key = (m.base, m.dir_name)
         unique[key] = m
-
-
     
     # Result with sorting (by priority, then by name)
     result = list(unique.values())
     result.sort(key=lambda m: (m.priority, m.name.lower()))
     return result
+
+# Returns True if OK, False if duplicates found (and logs errors).
+def abort_on_duplicate_mod_names(mods: List["Mod"]) -> bool:
+    by_name: Dict[str, List["Mod"]] = defaultdict(list)
+    for m in mods:
+        key = m.name.strip().lower()
+        by_name[key].append(m)
+
+    dup_groups = [(k, v) for k, v in by_name.items() if len(v) > 1]
+    if not dup_groups:
+        return True
+
+    log("[ERROR] Duplicate mod names detected! Aborting...")
+    for key, group in sorted(dup_groups, key=lambda x: x[0]):
+        display_name = group[0].name.strip() or key
+        log(f"[INFO] Duplicate mod name: '{display_name}'")
+        for m in group:
+            origin = m.meta.get("origin", "unknown")
+            log(f"        - {m.base} [{origin}] (priority={m.priority})")
+    return False
+
+
 
 
 # Single mod definition taken from /mods/ folder 
@@ -430,7 +454,7 @@ def perform_factory_reset(backup_root: Path, targets: List[Tuple[str, Path]]) ->
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dest)
-            log(f"[INFO] Restored backup: {f.name}")
+            log(f"[INFO] Backup restored: {f.name}")
             try:
                 f.unlink()
             except Exception as e:
@@ -486,6 +510,59 @@ def purge_all_backups(backup_root: Path) -> None:
         pass
 
 
+# Restore files from BACKUP_DIR when no enabled mod targets them anymore.
+def restore_orphaned_files(backup_root: Path, targets: List[Tuple[str, Path]], active_file_keys: set[str]) -> int:
+    if not backup_root.exists():
+        return 0
+
+    targets_map = _build_label_map_from_targets(targets)
+    label_keys = list(targets_map.keys())
+
+    backup_files = [p for p in backup_root.rglob('*') if p.is_file()]
+    if not backup_files:
+        return 0
+
+    restored = 0
+
+    for f in backup_files:
+        rel_parts = tuple(f.relative_to(backup_root).parts)
+        label_key = _find_best_label_for(rel_parts, label_keys)
+        if label_key is None:
+            continue
+
+        rel_path = Path(*rel_parts[len(label_key):])
+        rel_norm = norm_relpath(rel_path.as_posix())
+
+        # Still targeted by an enabled mod -> do nothing
+        if rel_norm in active_file_keys:
+            continue
+
+        # Restore from backup
+        dest_root = targets_map[label_key]
+        dest = dest_root / rel_path
+
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            # Avoid noisy logs if already identical
+            try:
+                if dest.exists() and dest.read_bytes() == f.read_bytes():
+                    continue
+            except Exception:
+                pass
+
+            shutil.copy2(f, dest)
+            label = "/".join(label_key)
+            log(f"==> {rel_norm} ({label})")
+            log(f"\t     [BACKUP RESTORED]    No enabled mod targets this file now")
+            restored += 1
+        except Exception as e:
+            log(f"[ERROR] Failed to restore orphaned backup {f}: {e}")
+
+    return restored
+
+
+
 
 # =====================================
 #               MAIN
@@ -502,6 +579,12 @@ def main() -> None:
 
     # 1) Discover mods
     mods = discover_all_mods(mods_dir, ws_root)
+    
+    # Hard stop on duplicate mod names
+    if not abort_on_duplicate_mod_names(mods):
+        print('')
+        return
+    
     if not mods:
         log(f"[INFO] No mods found in any known directory")
     else:
@@ -554,12 +637,21 @@ def main() -> None:
     file_keys.update(merged.file_line_replacements.keys())
     file_keys.update(merged.file_additions.keys())
     file_keys.update(merged.file_replacements.keys())
+    
+    # 5) Restore orphaned files (files that have backups but are no longer targeted by any enabled
+    restored_orphans = restore_orphaned_files(BACKUP_DIR, targets, file_keys)
+    if restored_orphans > 0:
+        log(f"[INFO] Restored {restored_orphans} orphaned file(s) from backups.")  
 
     if not file_keys:
-        log("[INFO] No replacement rules found across enabled mods. Nothing to do.")
+        if restored_orphans == 0:
+            log("[INFO] No replacement rules found across enabled mods. Nothing to do.")
+        else:
+            log("[INFO] No replacement rules found across enabled mods. Done.")
         return
 
-    # 5) Stats
+
+    # 6) Stats
     file_stats = defaultdict(lambda: defaultdict(int))  # file -> function -> count
     file_func_swaps = defaultdict(int)  # file -> num function swaps
     file_file_swaps = defaultdict(int)  # file -> num whole-file swaps
@@ -567,7 +659,7 @@ def main() -> None:
     # Ensure backup dir exists
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 6) PROCESS FILES
+    # 7) PROCESS FILES
     for rel in sorted(file_keys):
         target_rel = Path(rel)  # Path to file, example: "Program/interface/seadogs.c"
 

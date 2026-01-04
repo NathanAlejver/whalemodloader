@@ -13,27 +13,19 @@ import tkinter.font as tkfont
 import webbrowser
 from gui_panel_mods import ModsPanel
 from gui_common import COLOR_PALETTE as COLOR, FONTS, ICON_SIZE
-from gui_common import QueueStream, Tooltip, Icon, Scrollable, Button, PlaceholderEntry, HSeparator, Window, Titlebar
-from gui_common import hide_console_on_windows, _import_modloader, style_scrollbar
+from gui_common import QueueStream, Tooltip, Icon, Scrollable, Button, InputText, HSeparator, Window, Titlebar, FileManagement
+from gui_common import hide_console_on_windows, style_scrollbar
 from PIL import Image, ImageTk, ImageFilter, ImageOps
+import ModLoader, update_manager
 
 Titlebar.ensure_appid("ModLoaderGUI")
 
-ModLoader = _import_modloader()
 
 # Paths
-def get_app_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        # running as PyInstaller .exe
-        return Path(sys.executable).resolve().parent
-    else:
-        # running as plain .py
-        return Path(__file__).resolve().parent
-APP_DIR = get_app_dir()
+APP_DIR = ModLoader.get_app_dir()
 HERE = APP_DIR / "assets" / "settings"
 SETTINGS_PATH = HERE / ".gui_modloader_settings.json"
-
-
+FOLDER_NAME = ModLoader.FOLDER_NAME
 
 
 
@@ -80,6 +72,7 @@ LOG_PALETTE = {
 INLINE_STATUS_STYLE = {
     "NO CHANGE":         ("STATUS_NOCHANGE",   LOG_PALETTE["nochange"]),
     "BACKUP CREATED":    ("STATUS_BACKUP",     LOG_PALETTE["backup"]),
+    "BACKUP RESTORED":   ("STATUS_BACKUP",     LOG_PALETTE["backup"]),
     "UPDATE FILE":       ("STATUS_UPDATE",     LOG_PALETTE["action"]),
     "FILE REPLACE":      ("STATUS_UPDATE",     LOG_PALETTE["action"]),
     "REPLACE LINE":      ("STATUS_UPDATE",     LOG_PALETTE["action"]),
@@ -94,7 +87,7 @@ INLINE_STATUS_STYLE = {
 # Precompiled regexes
 RE_TIME     = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\]\s*")
 RE_INFOHDR  = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\]\s*\[(INFO|WARN|ERROR)\]")
-RE_STATUS   = re.compile(r"\[(NO CHANGE|BACKUP CREATED|UPDATE FILE|FILE REPLACE|REPLACE LINE|REPLACE FILE|REPLACE FILE-LINE|REPLACE FUNCTION|ADD START|ADD END)\]")
+RE_STATUS   = re.compile(r"\[(NO CHANGE|BACKUP CREATED|BACKUP RESTORED|UPDATE FILE|FILE REPLACE|REPLACE LINE|REPLACE FILE|REPLACE FILE-LINE|REPLACE FUNCTION|ADD START|ADD END)\]")
 RE_SUMMARYH = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\]\s*\[SUMMARY\]")
 RE_REPORT   = re.compile(r"^\[REPORT\]\s")
 RE_ARROW    = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\]\s*==> ")
@@ -104,7 +97,64 @@ _TS_RE = re.compile(r'^\s*(?:\[\d{1,2}:\d{2}:\d{2}\]|\d{4}-\d{2}-\d{2}[ T]\d{2}:
 
 
 
+# ---------------- Single-instance guard ----------------
 
+_INSTANCE_LOCK_HANDLE = None  # keep file handle alive for the whole app lifetime
+def _acquire_single_instance_lock() -> object | None:
+    # Use an OS-level file lock. If lock can't be acquired -> another instance is running.
+    lock_dir_path = HERE
+    lock_file_path = lock_dir_path / ".wml_gui.lock"
+
+    try:
+        lock_dir_path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    try:
+        lock_file_handle = open(lock_file_path, "a+", encoding="utf-8")
+    except Exception:
+        return None
+
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+            try:
+                lock_file_handle.seek(0)
+                lock_file_handle.truncate()
+                lock_file_handle.write(str(os.getpid()))
+                lock_file_handle.flush()
+
+                # Lock 1 byte (non-blocking)
+                msvcrt.locking(lock_file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return lock_file_handle
+            except Exception:
+                try:
+                    lock_file_handle.close()
+                except Exception:
+                    pass
+                return None
+        else:
+            import fcntl
+            try:
+                lock_file_handle.seek(0)
+                lock_file_handle.truncate()
+                lock_file_handle.write(str(os.getpid()))
+                lock_file_handle.flush()
+
+                fcntl.flock(lock_file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return lock_file_handle
+            except Exception:
+                try:
+                    lock_file_handle.close()
+                except Exception:
+                    pass
+                return None
+    except Exception:
+        try:
+            lock_file_handle.close()
+        except Exception:
+            pass
+        return None
 
 
 class ModLoaderApp(tk.Tk):
@@ -325,13 +375,13 @@ class ModLoaderApp(tk.Tk):
         right_box.grid(row=0, column=1, sticky="e")
         btn_pack = {"side":"left", "padx":(0,8)}
         
-        # Buttons
-        Button(right_box, text="Open mods folder", command=self.open_mods_folder, pack=btn_pack, tooltip="Opens local modloader's mods folder")      
+        #Button(right_box, text="Check updates", command=lambda: update_manager.check_and_update_gui(self), pack=btn_pack, tooltip="Check GitHub for updates and apply them")
         Button(right_box, text="Purge backup files", command=self.on_purge_backups_clicked, pack=btn_pack, tooltip="Deletes backup files created by ModLoader (ALWAYS use after game update)")
         self.btn_factory_reset = Button(right_box, text="Restore vanilla files ▶", command=self.on_factory_reset_clicked, pack=btn_pack, tooltip="Resets your game to factory settings (Ctrl+Shift+R)")
 
-        STEAM_URL = "steam://rungameid/2230980"
-        Icon.Button(right_box, "game", size=34,
+
+        STEAM_URL = ModLoader.STEAM_URL
+        Icon.Button(right_box, "game", size=40,
                     command= lambda: webbrowser.open(STEAM_URL),
                     tooltip="Start the game", pack=btn_pack) 
         
@@ -361,7 +411,7 @@ class ModLoaderApp(tk.Tk):
         self.find_match_case = tk.BooleanVar(value=False)
 
         # Find input
-        self.find_entry = PlaceholderEntry(search_bar, "Search...", textvariable=self.find_var)  
+        self.find_entry = InputText(search_bar, "Search...", textvariable=self.find_var)  
         self.find_var.trace_add("write", lambda *a: self._apply_find(highlight_all=True, jump_first=False))
         self.find_entry.pack(side=tk.LEFT, fill="x", expand=True, padx=(0,6))         
         
@@ -728,7 +778,6 @@ class ModLoaderApp(tk.Tk):
 
     def _get_version_string(self) -> str:
         try:
-            ModLoader = _import_modloader()
             ver = getattr(ModLoader, "VERSION", None)
             if ver:
                 return f"{ver}"
@@ -738,7 +787,6 @@ class ModLoaderApp(tk.Tk):
 
     def _get_author_string(self) -> str:
         try:
-            ModLoader = _import_modloader()
             ver = getattr(ModLoader, "AUTHOR", None)
             if ver:
                 return f"{ver}"
@@ -763,7 +811,7 @@ class ModLoaderApp(tk.Tk):
                 chosen = "HEADER"
             elif re.search(r"\[INFO\]", line, re.I):
                 chosen = "INFO"
-            elif re.search(r"\[BACKUP CREATED\]", line, re.I):
+            elif re.search(r"\[BACKUP CREATED\]", line, re.I) or re.search(r"\[BACKUP RESTORED\]", line, re.I):
                 chosen = "BACKUP_CREATED"
             elif re.search(r"\bNO CHANGE\b", line, re.I) or re.search(r"already up-?to-?date", line, re.I):
                 chosen = "NOCHANGE"
@@ -856,7 +904,6 @@ class ModLoaderApp(tk.Tk):
     # Enable 'Restore vanilla files' only if backup dir has files.
     def _update_restore_button_state(self) -> None:
         
-        ModLoader = _import_modloader()
         backup_dir = ModLoader.BACKUP_DIR
         has_files = False
 
@@ -917,9 +964,8 @@ class ModLoaderApp(tk.Tk):
 
     def _run_modloader_once(self, factory: bool, purge_backups: bool = False):
         try:
-            ModLoader = _import_modloader()
             import importlib
-            ModLoader = importlib.reload(ModLoader)
+            importlib.reload(ModLoader)
         except Exception as e:
             self.log_queue.put(("STDERR", "[ERROR] Could not import/reload ModLoader: {}\n".format(e)))
             self.after(0, lambda: self._set_controls_enabled(True))
@@ -978,38 +1024,6 @@ class ModLoaderApp(tk.Tk):
             self.after(0, _maybe_notify)
 
     # ---------- Actions ----------
-    def open_mods_folder(self):
-        
-        
-        #try:
-        #    ModLoader = _import_modloader()
-        #    mods_dir = Path(ModLoader.__file__).resolve().parent / "mods"
-        #except Exception:
-        #    mods_dir = HERE / "mods"
-        #mods_dir.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            ModLoader = _import_modloader()
-            base_dir = getattr(ModLoader, "APP_DIR", None)
-            if base_dir is None:
-                base_dir = Path(ModLoader.__file__).resolve().parent
-            base_dir = Path(base_dir)
-        except Exception:
-            base_dir = APP_DIR
-
-        mods_dir = base_dir / "mods"
-        mods_dir.mkdir(parents=True, exist_ok=True)
-        
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(str(mods_dir))  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                os.system('open "{}"'.format(mods_dir))
-            else:
-                os.system('xdg-open "{}"'.format(mods_dir))
-        except Exception as e:
-            messagebox.showerror("Open mods folder", "Failed to open folder:\n{}".format(e))
-
     def save_log(self):
         content = self.txt.get("1.0", "end-1c")
         if not content.strip():
@@ -1210,20 +1224,35 @@ class ModLoaderApp(tk.Tk):
 
     def _save_settings(self):
         try:
+            # Load existing settings so we don't wipe other keys (e.g. mods UI state)
+            data = {}
+            try:
+                if SETTINGS_PATH.exists():
+                    data = json.loads(SETTINGS_PATH.read_text("utf-8"))
+                    if not isinstance(data, dict):
+                        data = {}
+            except Exception:
+                data = {}
+
+            # Calculate sash_ratio
             try:
                 total = max(1, int(self.paned.winfo_width()))
                 pos = int(self.paned.sashpos(0)) if hasattr(self.paned, 'sashpos') else 0
                 sash_ratio = max(0.0, min(1.0, pos / total))
             except Exception:
                 sash_ratio = getattr(self, "_sash_target_ratio", 0.60)
-            data = {
+
+            # Update only keys owned by gui_run.py
+            data.update({
                 "geometry": self.winfo_geometry(),
                 "clear_before_run": bool(self.clear_before_run.get()),
                 "sash_ratio": sash_ratio
-            }
-            SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            })
+
+            SETTINGS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
+
 
     def _on_close(self):
         self._save_settings()
@@ -1234,9 +1263,22 @@ class ModLoaderApp(tk.Tk):
 import json  # placed here to keep imports local for frozen apps
 
 def main():
+    global _INSTANCE_LOCK_HANDLE
+
+    _INSTANCE_LOCK_HANDLE = _acquire_single_instance_lock()
+    if _INSTANCE_LOCK_HANDLE is None:
+        # Show a GUI message even without starting the full app window
+        try:
+            tmp_root = tk.Tk()
+            tmp_root.withdraw()
+            messagebox.showinfo("Whale Mod Loader", "Hold on, Captain! Whale is already running!")
+            tmp_root.destroy()
+        except Exception:
+            pass
+        return
+
     app = ModLoaderApp()
     app.mainloop()
-
 
 if __name__ == "__main__":
     main()

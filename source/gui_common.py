@@ -5,9 +5,10 @@
 
 from __future__ import annotations
 
-import io, os, sys, math
+import io, os, sys, math, subprocess
 from pathlib import Path
-from typing import Optional, Tuple, Any
+from tkinter import messagebox
+from typing import Optional, Tuple, Any, Callable, Union
 import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.ttk as ttk
@@ -18,10 +19,9 @@ import ctypes as ct
 from ctypes import wintypes
 import sys, time, weakref, threading
 from PIL import Image, ImageTk, ImageFilter
+import ModLoader
 
-
-
-
+FOLDER_NAME = ModLoader.FOLDER_NAME
 HERE = Path(__file__).resolve().parent
 
 ICON_SIZE = 20
@@ -136,12 +136,7 @@ COLOR             = COLOR_PALETTE
 
 
 
-# Import ModLoader module that sits next to this file. Returns the imported module. Does not raise if import path injection fails.
-def _import_modloader():
-    if str(HERE) not in sys.path:
-        sys.path.insert(0, str(HERE))
-    import ModLoader  # type: ignore
-    return ModLoader
+
 
 # Hide the console window on Windows when running the Tk app (we don't like sad black windows, do we?)
 def hide_console_on_windows():
@@ -624,6 +619,7 @@ class Window:
 
 # ---------------- Scrollabe ----------------
 
+
 class Scrollable(tk.Frame):
     def __init__(self, master, **kw):
         bg = kw.pop("bg", COLOR["panel"])
@@ -916,8 +912,234 @@ class QueueStream(io.TextIOBase):
         pass
 
 
+# Draw a rounded rectangle on a Canvas as a smoothed polygon. Returns item id.
+def _canvas_round_rect(canvas: tk.Canvas, x1, y1, x2, y2, r, **kwargs):
+    r = max(0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+    points = [
+        x1 + r, y1,
+        x2 - r, y1,
+        x2, y1,
+        x2, y1 + r,
+        x2, y2 - r,
+        x2, y2,
+        x2 - r, y2,
+        x1 + r, y2,
+        x1, y2,
+        x1, y2 - r,
+        x1, y1 + r,
+        x1, y1
+    ]
+    return canvas.create_polygon(points, smooth=True, splinesteps=24, **kwargs)
+
+# Safely get background color for both tk and ttk widgets.
+def _safe_widget_bg(w: tk.Misc, fallback: str | None = None) -> str:
+    if fallback is None:
+        fallback = COLOR.get("panel", "#000000")
+
+    # tk widgets
+    try:
+        return str(w.cget("bg"))
+    except Exception:
+        pass
+
+    # ttk widgets
+    try:
+        st = ttk.Style(w)
+        try:
+            stylename = w.cget("style")
+        except Exception:
+            stylename = ""
+        if not stylename:
+            stylename = w.winfo_class()
+
+        bg = st.lookup(stylename, "background", default="") or st.lookup(stylename, "fieldbackground", default="")
+        return str(bg) if bg else fallback
+    except Exception:
+        return fallback
+
+
+# Multiline Text with placeholder support
+class InputMultiline(tk.Frame):
+    def __init__(self, master, placeholder: str, **kw):
+        fg   = kw.pop("fg",   COLOR["text"])
+        bg   = kw.pop("bg",   COLOR["input_bg"])
+        meta = kw.pop("meta", COLOR["meta"])
+        font = kw.pop("font", FONTS["mono"])
+
+        border_col = kw.pop("bordercolor", COLOR["border"])
+        focus_col  = kw.pop("focuscolor",  COLOR.get("focus", "#3d5566"))
+
+        radius    = kw.pop("radius", 2)
+        border_w  = kw.pop("borderwidth", 2)
+        inner_pad = kw.pop("innerpad", 6)
+
+        self._ext_var = kw.pop("textvariable", None)
+        self._sync_on = bool(self._ext_var is not None)
+
+        height = kw.pop("height", 5)
+        wrap   = kw.pop("wrap", "word")
+        add_scrollbar = kw.pop("scrollbar", False)
+
+        parent_bg = _safe_widget_bg(master, fallback=COLOR["panel"])
+        super().__init__(master, bg=parent_bg, bd=0, highlightthickness=0)
+
+        self._ph = placeholder
+        self._ph_color = meta
+        self._fg_real = fg
+        self._bg_real = bg
+        self._border_col = border_col
+        self._focus_col = focus_col
+        self._radius = radius
+        self._border_w = border_w
+        self._inner_pad = inner_pad
+
+        self._has_ph = False
+        self._updating = False
+
+        self.canvas = tk.Canvas(self, bd=0, highlightthickness=0, relief="flat", bg=parent_bg)
+        self.canvas.pack(fill="both", expand=True)
+
+        self.inner = tk.Frame(self.canvas, bg=bg, bd=0, highlightthickness=0)
+        self._win_id = self.canvas.create_window(0, 0, window=self.inner, anchor="nw")
+
+        self.text = tk.Text(
+            self.inner,
+            height=height,
+            wrap=wrap,
+            font=font,
+            fg=fg,
+            bg=bg,
+            insertbackground=fg,
+            bd=0,
+            highlightthickness=0,
+            undo=True,
+        )
+
+        if add_scrollbar:
+            style_name = style_scrollbar(self)
+            vbar = ttk.Scrollbar(self.inner, orient="vertical", command=self.text.yview, style=style_name)
+            self.text.configure(yscrollcommand=vbar.set)
+            self.text.grid(row=0, column=0, sticky="nsew")
+            vbar.grid(row=0, column=1, sticky="ns")
+            self.inner.grid_rowconfigure(0, weight=1)
+            self.inner.grid_columnconfigure(0, weight=1)
+        else:
+            self.text.pack(fill="both", expand=True)
+
+        self.text.tag_configure("placeholder", foreground=self._ph_color)
+
+        def _content_is_empty() -> bool:
+            return (self.text.get("1.0", "end-1c") == "")
+
+        def _put_ph():
+            if self._has_ph:
+                return
+            if _content_is_empty():
+                self._has_ph = True
+                self.text.insert("1.0", self._ph, ("placeholder",))
+
+        def _clear_ph():
+            if not self._has_ph:
+                return
+            self.text.delete("1.0", "end")
+            self._has_ph = False
+
+        self._put_ph = _put_ph
+        self._clear_ph = _clear_ph
+
+        def _redraw(outline_color: str):
+            self.canvas.delete("field")
+            w = self.canvas.winfo_width()
+            h = self.canvas.winfo_height()
+            if w <= 2 or h <= 2:
+                return
+
+            _canvas_round_rect(
+                self.canvas,
+                1, 1,
+                w - 1, h - 1,
+                r=self._radius,
+                fill=self._bg_real,
+                outline=outline_color,
+                width=self._border_w,
+                tags=("field",)
+            )
+
+            pad = self._border_w + self._inner_pad
+            self.canvas.coords(self._win_id, pad, pad)
+            self.canvas.itemconfigure(self._win_id, width=max(0, w - pad * 2), height=max(0, h - pad * 2))
+
+        self.canvas.bind("<Configure>", lambda e: _redraw(self._border_col), add="+")
+
+        def _focus_in(_=None):
+            _clear_ph()
+            _redraw(self._focus_col)
+
+        def _focus_out(_=None):
+            _redraw(self._border_col)
+            if _content_is_empty():
+                _put_ph()
+
+        self.text.bind("<FocusIn>",  _focus_in,  add="+")
+        self.text.bind("<FocusOut>", _focus_out, add="+")
+        self.text.bind("<KeyPress>", lambda e: (_clear_ph() if self._has_ph else None), add="+")
+
+        if self._sync_on:
+            def _on_ext_change(*_):
+                if self._updating:
+                    return
+                self._updating = True
+                try:
+                    self.set_text(self._ext_var.get())
+                finally:
+                    self._updating = False
+
+            def _sync_to_var(_=None):
+                if self._updating:
+                    return
+                self._updating = True
+                try:
+                    self._ext_var.set(self.get())
+                finally:
+                    self._updating = False
+
+            try:
+                self._ext_var.trace_add("write", _on_ext_change)
+            except Exception:
+                pass
+
+            for seq in ("<KeyRelease>", "<<Paste>>", "<<Cut>>"):
+                self.text.bind(seq, _sync_to_var, add="+")
+            _on_ext_change()
+
+        _put_ph()
+        self.after(0, lambda: _redraw(self._border_col))
+
+    def __getattr__(self, item):
+        # forward methods to the inner Text for convenience (e.g. .insert, .delete, etc.)
+        t = object.__getattribute__(self, "text")
+        if hasattr(t, item):
+            return getattr(t, item)
+        raise AttributeError(item)
+
+    def get(self) -> str:
+        if self._has_ph:
+            return ""
+        return self.text.get("1.0", "end-1c")
+
+    def set_text(self, text: str):
+        self._clear_ph()
+        self.text.delete("1.0", "end")
+        if text:
+            self.text.insert("1.0", text)
+            self._has_ph = False
+        else:
+            self._put_ph()
+
+
+
 # Minimalistic Entry with placeholder support
-class PlaceholderEntry(ttk.Entry):
+class InputText(ttk.Entry):
     _seq = 0
     def __init__(self, master, placeholder: str, **kw):
         fg   = kw.pop("fg",   COLOR["text"])
@@ -925,22 +1147,21 @@ class PlaceholderEntry(ttk.Entry):
         meta = kw.pop("meta", COLOR["meta"])
         font = kw.pop("font", FONTS["mono"])
         self._ext_var = kw.pop("textvariable", None)
-        
+
         border_col = kw.pop("bordercolor", COLOR["border"])
-        focus_col  = kw.pop("focuscolor",  COLOR.get("focus",  "#3d5566"))
-        
-        # style
-        PlaceholderEntry._seq += 1
-        stylename = f"PlaceholderEntry{PlaceholderEntry._seq}.TEntry"
+        focus_col  = kw.pop("focuscolor",  COLOR.get("focus", "#3d5566"))
+
+        InputText._seq += 1
+        stylename = f"PlaceholderEntry{InputText._seq}.TEntry"
         style = ttk.Style(master)
         style.theme_use("clam")
         style.configure(
             stylename,
             padding=(8, 6),
             insertcolor=fg,
-            foreground=fg,            
+            foreground=fg,
             background=bg,
-            fieldbackground=bg,            
+            fieldbackground=bg,
             borderwidth=0,
             relief="flat",
             bordercolor=border_col,
@@ -956,13 +1177,11 @@ class PlaceholderEntry(ttk.Entry):
             darkcolor=[("focus", focus_col), ("!focus", border_col)],
             focuscolor=[("focus", focus_col), ("!focus", border_col)],
         )
-        
 
         kw.setdefault("style", stylename)
         kw.setdefault("font", font)
         super().__init__(master, **kw)
 
-        # --- placeholder jak u Ciebie ---
         self._ph = placeholder
         self._ph_color = meta
         self._fg_real = fg
@@ -988,7 +1207,7 @@ class PlaceholderEntry(ttk.Entry):
         self.bind("<FocusIn>",  lambda e: _clear_ph(), add="+")
         self.bind("<FocusOut>", lambda e: _put_ph(),   add="+")
 
-        # dwukierunkowe textvariable (opcjonalnie)
+        # 2-way StringVar sync (optional)
         if self._ext_var is not None:
             def _on_ext_change(*_):
                 if self._updating: return
@@ -1006,6 +1225,7 @@ class PlaceholderEntry(ttk.Entry):
                     self._ext_var.set(self.get())
                 finally:
                     self._updating = False
+
             for seq in ("<KeyRelease>", "<<Paste>>", "<<Cut>>"):
                 self.bind(seq, _sync_to_var, add="+")
             _on_ext_change()
@@ -1031,7 +1251,6 @@ class PlaceholderEntry(ttk.Entry):
         self._put_ph()
         if getattr(self, "_ext_var", None) is not None:
             self._ext_var.set("")
-
 
 
 
@@ -1347,8 +1566,44 @@ class Icon:
         return lbl
     
     
+
+class FileManagement:     
+  
+    # Get main game directory
+    @staticmethod
+    def GetDir_Game():
+        return ModLoader.APP_DIR.parent        
+        
+    # Get ModLoader directory
+    @staticmethod    
+    def GetDir_ModLoader():
+        return ModLoader.APP_DIR
     
+     
+     # Get path depending on OS
+    @staticmethod
+    def _open_path(p: Path, title: str = "Open") -> None:
+        try:
+            p = Path(p).expanduser().resolve()
+            if not p.exists(): raise FileNotFoundError(str(p))
+
+            if sys.platform.startswith("win"): os.startfile(str(p))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin": subprocess.run(["open", str(p)], check=False)
+            else: subprocess.run(["xdg-open", str(p)], check=False)
+        except Exception as e:
+            messagebox.showerror(title, f"Failed to open:\n{e}")
+      
+    #Open file/folder
+    @staticmethod
+    def Open(p: Path, title: str = "Open") -> None:
+        FileManagement._open_path(p, title=title)
     
+    # Open PARENT file/folder
+    @staticmethod
+    def OpenParentDir(p: Path, title: str = "Open") -> None:
+        p = Path(p).expanduser().resolve()
+        target = p if p.is_dir() else p.parent
+        FileManagement._open_path(target, title=title)
 
 # Tooltip for widgets.
 class Tooltip:

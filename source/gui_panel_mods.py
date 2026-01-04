@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
-import re, sys, json, types, shutil, importlib.util
-from gui_common import _import_modloader, style_scrollbar, COLOR_PALETTE as COLOR, ICON_SIZE, FONTS
-from gui_common import Tooltip, Button, Scrollable, Icon, HSeparator, Window, Titlebar, PlaceholderEntry
-import os
-import webbrowser
+import re, sys, json, types, shutil, importlib.util, os, webbrowser, json
+from gui_common import style_scrollbar, COLOR_PALETTE as COLOR, ICON_SIZE, FONTS
+from gui_common import Tooltip, Button, Scrollable, Icon, HSeparator, Window, Titlebar, FileManagement, InputText, InputMultiline
+from PIL import Image, ImageTk, ImageOps, ImageEnhance
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 import tkinter as tk
 from tkinter import ttk, messagebox
-
+import ModLoader
 from gui_editor_replacements import ReplacementsBrowser
+
 
 CARD_BG          = COLOR["card_bg"]
 CARD_BG_HOVER    = COLOR["card_bg_hover"]
@@ -41,7 +41,18 @@ FONT_BASE        = FONTS["base"]
 FONT_BASE_BOLD   = FONTS["base_bold"]
 FONT_BASE_MINI   = FONTS["base_mini"]
 
-MODS_LEFT_MARGIN = 16
+
+MOD_THUMB_SIZE = 128  # square thumbnail size (px)
+MOD_THUMB_PADX = 12  # space between thumb and text
+MOD_THUMB_SIZE_COLLAPSED = MOD_THUMB_SIZE // 2
+
+MODS_LEFT_MARGIN = 12
+SHOW_PRIORITY_BADGE = False
+MODS_UI_STATE_FILE = "mods_ui_state.json"
+
+HERE = ModLoader.APP_DIR / "assets" / "settings"
+SETTINGS_PATH = HERE / ".gui_modloader_settings.json"
+MODS_PATH = ModLoader.APP_DIR / "mods"
 
 RowRefs = Tuple[
     tk.Widget, tk.Widget, tk.Widget | None, tk.Widget | None, tk.Widget | None,
@@ -111,6 +122,8 @@ class ModsPanel(ttk.Frame):
         self.style.configure("Mods.Meta.TLabel",            foreground=META_FG, font=FONT_BASE_MINI)
         self.style.configure("Mods.MetaDisabled.TLabel",    foreground=DESC_DISABLED, font=FONT_BASE_MINI)
         self.icons: dict[str, tk.PhotoImage] = {} # icon cache
+        self.thumbs: dict[str, tk.PhotoImage] = {}  # thumbnail cache
+
         
         # ---list/drag/collapse state ---
         self._order: List[str] = []
@@ -118,7 +131,8 @@ class ModsPanel(ttk.Frame):
         self._mod_by_key: Dict[str, Dict[str, Any]] = {}
         self._row_refs: Dict[str, RowRefs] = {}
         self._drag = None
-        self._collapsed: Dict[str, bool] = {}  # key -> collapsed (True=compact)
+        self._collapsed = {}
+        self._load_collapsed_from_settings()
 
         # --- top area ---
         self.columnconfigure(0, weight=1)
@@ -134,16 +148,22 @@ class ModsPanel(ttk.Frame):
 
         # Add Icon
         Icon.Button(title_row, "create", size=int(ICON_SIZE*1), command=self.add_new_mod,
-                    tooltip="Create a new mod (Ctrl+N)", pack={"side":"left", "padx":(6, 0)})
-
+                    tooltip="Create a new mod (Ctrl+N)", pack={"side":"left", "padx":(6, 0)})        
+        
+        Icon.Button(title_row, "folder", size=int(ICON_SIZE*1), command=lambda: FileManagement.Open(MODS_PATH, title="Open local mods folder"),
+                    tooltip="Open local mods folder", pack={"side":"left", "padx":(10, 0)})
+        
+        Icon.Button(title_row, "refresh", size=int(ICON_SIZE*1), command=self.refresh,
+                    tooltip="Reload and redraw the mods list (F5)", pack={"side":"left", "padx":(10, 0)})
+        
         # Buttons
         def btn_grid(btn_column): return {"row": 0, "column": btn_column, "padx": (6, 0)}
-        Button(top, text="Refresh mod list", command=self.refresh, grid=btn_grid(1), tooltip="Reload and redraw the mods list (F5)")
+        #Button(top, text="Refresh mod list", command=self.refresh, grid=btn_grid(1), tooltip="Reload and redraw the mods list (F5)")
         Button(top, text="Enable All", command=lambda: self._set_all(True), grid=btn_grid(2), tooltip="Make all mods active")
         Button(top, text="Disable All", command=lambda: self._set_all(False), grid=btn_grid(3), tooltip="Make all mods inactive")
         
         # Tips
-        ttk.Label(top, text="All mods located in the /mods/ directory will appear here (after refreshing).\nTip: drag cards to reorder  •  Click title to expand/collapse",
+        ttk.Label(top, text="All mods located in the /mods/ directory will appear here (after refreshing).\nTip: drag cards to reorder  •  Click title to expand/collapse  •  Ctrl+click Edit to open replacements.py directly",
                   foreground=META_FG, font=FONT_BASE_MINI)\
             .grid(row=1, column=0, columnspan=4, sticky="w", pady=(18, 0))
 
@@ -187,11 +207,42 @@ class ModsPanel(ttk.Frame):
         except Exception:
             pass
 
+    # ---------- save/load ----------
+    def _load_collapsed_from_settings(self):
+        try:
+            if not SETTINGS_PATH.exists():
+                return
+            data = json.loads(SETTINGS_PATH.read_text("utf-8"))
+            collapsed = data.get("mods_collapsed", {})
+            if isinstance(collapsed, dict):
+                self._collapsed = {str(k).lower(): bool(v) for k, v in collapsed.items()}
+        except Exception:
+            pass
+
+    def _save_collapsed_to_settings(self):
+        try:
+            # merge with existing settings, don't wipe gui_run keys
+            data = {}
+            try:
+                if SETTINGS_PATH.exists():
+                    data = json.loads(SETTINGS_PATH.read_text("utf-8"))
+                    if not isinstance(data, dict):
+                        data = {}
+            except Exception:
+                data = {}
+
+            # Optionally store only collapsed=True to keep file small
+            data["mods_collapsed"] = {k: True for k, v in self._collapsed.items() if v}
+
+            SETTINGS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+
+
     # ---------- helpers / canvas ----------
     def _get_mods_dir(self) -> Path:
         try:
-            ModLoader = _import_modloader()
-
             # Prefer shared APP_DIR from ModLoader
             base_dir = getattr(ModLoader, "APP_DIR", None)
             if base_dir is None:
@@ -210,6 +261,22 @@ class ModsPanel(ttk.Frame):
         if not bbox: return
         self.canvas.itemconfigure(self.cards_frame_id, width=self.canvas.winfo_width())
 
+
+    # ---------- opening replacements.py ----------
+
+    def _open_replacements_py(self, mod_dir: Path):
+        candidates = [
+            mod_dir / "replacements.py",
+            mod_dir / "files" / "replacements.py",
+            mod_dir / "functions" / "replacements.py",
+            mod_dir / "lines" / "replacements.py",
+        ]
+        for p in candidates:
+            if p.exists():
+                FileManagement.Open(p)
+                return
+        messagebox.showinfo("Replacements", "replacements.py not found in this mod. Whale is sad.")
+
     # --- wraplength ---
     def _update_wraplengths(self):
         if not self._row_refs:
@@ -217,7 +284,7 @@ class ModsPanel(ttk.Frame):
         avail = self.canvas.winfo_width()
         if avail <= 0:
             return
-        LEFT_PAD = MODS_LEFT_MARGIN + 10 + 48
+        LEFT_PAD = MODS_LEFT_MARGIN + 10 + MOD_THUMB_SIZE + MOD_THUMB_PADX + 48
         max_right = 220
         for refs in self._row_refs.values():
             try:
@@ -276,6 +343,91 @@ class ModsPanel(ttk.Frame):
         lbl.bind("<Leave>", _leave, add="+")
         return lbl
 
+    def _get_placeholder_thumb_path(self) -> Path:
+        # Try JPG first (as requested), then PNG fallback if someone provides it
+        base = Path(__file__).resolve().parent / "assets" / "icons"
+        p_jpg = base / "mod_placeholder.jpg"
+        if p_jpg.exists():
+            return p_jpg
+        p_png = base / "mod_placeholder.png"
+        if p_png.exists():
+            return p_png
+        return p_jpg  # may not exist, but caller will handle
+
+    # Load thumbnail
+    def _resolve_mod_thumb_path(self, mod_dir: Path, raw: Dict[str, Any]) -> Path:
+        candidates = [
+            mod_dir / "thumbnail.png",
+            mod_dir / "thumbnail.jpg",
+            mod_dir / "thumbnail.jpeg",
+        ]
+        for p in candidates:
+            try:
+                if p.exists() and p.is_file():
+                    return p
+            except Exception:
+                pass
+        return self._get_placeholder_thumb_path()
+
+    def _load_thumb_image(self, img_path: Path, size: int = MOD_THUMB_SIZE, toned_down: bool = False) -> tk.PhotoImage:
+        # Cache by path + mtime + size
+        try:
+            rp = img_path.resolve()
+        except Exception:
+            rp = img_path
+
+        mtime = 0
+        try:
+            if rp.exists():
+                mtime = int(rp.stat().st_mtime)
+        except Exception:
+            mtime = 0
+
+        key = f"{str(rp)}@{size}@{mtime}@{'td1' if toned_down else 'td0'}"
+        if key in self.thumbs:
+            return self.thumbs[key]
+
+        # If the chosen file doesn't exist, fall back
+        if not rp.exists():
+            rp = self._get_placeholder_thumb_path()
+
+        # PIL route (supports JPG/PNG/etc.)
+        if Image is not None and ImageTk is not None:
+            try:
+                im = Image.open(str(rp))
+                im = im.convert("RGBA")
+
+                w, h = im.size
+                s = min(w, h)
+                left = (w - s) // 2
+                top = (h - s) // 2
+                im = im.crop((left, top, left + s, top + s))
+                im = im.resize((size, size), Image.LANCZOS)
+                if toned_down:
+                    # // desaturate and slightly dim
+                    im = ImageOps.grayscale(im).convert("RGBA")
+                    im = ImageEnhance.Brightness(im).enhance(0.78)
+                    im = ImageEnhance.Contrast(im).enhance(0.92)
+                photo = ImageTk.PhotoImage(im)
+                self.thumbs[key] = photo
+                return photo
+            except Exception:
+                pass
+
+        # Tk route (mostly PNG/GIF)
+        try:
+            photo = tk.PhotoImage(file=str(rp))
+            if photo.width() > size:
+                factor = max(1, int(round(photo.width() / size)))
+                photo = photo.subsample(factor, factor)
+            self.thumbs[key] = photo
+            return photo
+        except Exception:
+            # Final fallback: empty image
+            photo = tk.PhotoImage(width=size, height=size)
+            self.thumbs[key] = photo
+            return photo
+
     def _open_link(self, url: str):
         url = (url or "").strip()
         if not url:
@@ -300,7 +452,6 @@ class ModsPanel(ttk.Frame):
 
         # Steam Workshop mods (if ModLoader exposes helpers)
         try:
-            ModLoader = _import_modloader()
             # game_root is defined in ModLoader; fall back to parent of script_dir
             game_root = Path(getattr(
                 ModLoader,
@@ -333,7 +484,7 @@ class ModsPanel(ttk.Frame):
                             continue
                         nested = child / "WhaleModLoader" / "mods"
                         if nested.exists():
-                            roots.append((nested, f"Workshop item {child.name}"))
+                            roots.append((nested, f"Workshop item: {child.name}"))
                 except Exception:
                     pass
         except Exception:
@@ -582,6 +733,27 @@ class ModsPanel(ttk.Frame):
                 w.bind("<Enter>", lambda e, rk=key: _in(row_key=rk), add="+")
                 w.bind("<Leave>", lambda e, rk=key: _out(row_key=rk), add="+")
             except Exception: pass
+            
+        # --- update thumbnail tone when enabling/disabling ---
+        try:
+            collapsed_now = bool(self._collapsed.get(key, False))
+            thumb_size_now = MOD_THUMB_SIZE_COLLAPSED if collapsed_now else MOD_THUMB_SIZE
+
+            for child in card_w.winfo_children():
+                if getattr(child, "_is_mod_thumb", False):
+                    thumb_path_now = getattr(child, "_thumb_path", None)
+                    if thumb_path_now is not None:
+                        new_img = self._load_thumb_image(
+                            thumb_path_now,
+                            size=thumb_size_now,
+                            toned_down=(not is_enabled)
+                        )
+                        child.configure(image=new_img)
+                        child.image = new_img
+                    break
+        except Exception:
+            pass
+            
 
     # ---------- collapsible + opis/changes ----------
     def _split_description_fallback(self, raw: str) -> Tuple[str, List[str]]:
@@ -614,15 +786,71 @@ class ModsPanel(ttk.Frame):
 
     def _toggle_collapse(self, key: str):
         self._collapsed[key] = not self._collapsed.get(key, False)
+        collapsed = self._collapsed.get(key, False)
+
         refs = self._row_refs.get(key)
-        if not refs: return
-        _, _, _, changes_lbl, _, _, _, _, _, _ = refs
-        if changes_lbl is not None:
-            if self._collapsed.get(key, False): changes_lbl.grid_remove()
-            else: changes_lbl.grid()
+        if not refs:
+            return
+
+        card_w, title_w, intro_w, changes_w, meta_w, _, _, header_w, _, _ = refs
+        m = self._mod_by_key.get(key)
+
+        # --- update chevron without rebuilding the whole list ---
+        try:
+            for child in header_w.winfo_children():
+                if getattr(child, "_is_mod_chevron", False):
+                    child.configure(text=("▸" if collapsed else "▾"))
+                    break
+        except Exception:
+            pass
+
+        # --- update intro text (ellipsize on collapse) ---
+        if m and intro_w is not None:
+            intro_text = str(m.get("description") or "")
+            changes_list = m.get("changes") or []
+            if not changes_list:
+                intro_text, changes_list = self._split_description_fallback(intro_text)
+
+            if collapsed:
+                intro_text = self._ellipsize(intro_text, 220)
+
+            try:
+                intro_w.configure(text=intro_text)
+            except Exception:
+                pass
+
+        # --- show / hide changes block ---
+        if changes_w is not None:
+            try:
+                if collapsed:
+                    changes_w.grid_remove()
+                else:
+                    changes_w.grid()
+            except Exception:
+                pass
+
+        # --- resize thumbnail on collapse/expand (no refresh) ---
+        try:
+            thumb_size = MOD_THUMB_SIZE_COLLAPSED if collapsed else MOD_THUMB_SIZE
+            for child in card_w.winfo_children():
+                if getattr(child, "_is_mod_thumb", False):
+                    thumb_path = getattr(child, "_thumb_path", None)
+                    if thumb_path is not None:                        
+                        mod_data = self._mod_by_key.get(key)
+                        enabled_now = True
+                        if mod_data is not None:
+                            enabled_now = bool(mod_data.get("enabled", True))
+                        img = self._load_thumb_image(thumb_path, size=thumb_size, toned_down=(not enabled_now))
+                        child.configure(image=img)
+                        child.image = img
+                    break
+        except Exception:
+            pass
+
         self.cards_frame.update_idletasks()
         self._on_frame_configure()
         self._update_wraplengths()
+        self._save_collapsed_to_settings()
 
     # ---------- render ----------
     def refresh(self):
@@ -640,6 +868,7 @@ class ModsPanel(ttk.Frame):
 
         mods.sort(key=lambda m: (m["priority"], m["name"].lower()))
         self._ensure_order_covers(mods)
+        
 
         for row, m in enumerate(mods):
             key = self._key_for(m)
@@ -648,24 +877,50 @@ class ModsPanel(ttk.Frame):
 
             card = ttk.Frame(self.cards_frame, padding=(MODS_LEFT_MARGIN, 12, 12, 12), style="Mods.Card.TFrame")
             card.grid(row=row * 2, column=0, sticky="ew", padx=0, pady=0)
-            card.columnconfigure(0, weight=1)
+            
+            is_enabled = bool(m.get("enabled", False))
+            
+            # Columns: [thumb] [content] [right buttons]
+            card.columnconfigure(0, weight=0)
+            card.columnconfigure(1, weight=1)
+            card.columnconfigure(2, weight=0)
+            hover_children: List[tk.Widget] = []
+            
+            # --- thumbnail (from manifest or placeholder) ---
+            raw = m.get("raw") or {}
+            thumb_path = self._resolve_mod_thumb_path(m["dir"], raw)
+            thumb_size = MOD_THUMB_SIZE
+            if self._collapsed.get(key, False):
+                thumb_size = MOD_THUMB_SIZE_COLLAPSED
+
+            thumb_img = self._load_thumb_image(thumb_path, size=thumb_size, toned_down=(not is_enabled))
+            thumb_lbl = tk.Label(card, image=thumb_img, bg=CARD_BG, bd=0, highlightthickness=0)
+            thumb_lbl.image = thumb_img
+            thumb_lbl.grid(row=0, column=0, rowspan=10, sticky="nw", padx=(0, MOD_THUMB_PADX), pady=(0, 0))
+            thumb_lbl._is_mod_thumb = True      # marker for collapse updates
+            thumb_lbl._thumb_path   = thumb_path  # remember resolved path
+            hover_children.append(thumb_lbl)
+            
             self._card_by_key[key] = card
 
             header = tk.Frame(card, bg=CARD_BG, bd=0, highlightthickness=0)
-            header.grid(row=0, column=0, sticky="ew")
+            header.grid(row=0, column=1, sticky="ew")
             header.grid_columnconfigure(2, weight=1)
             
             pr = tk.Label(header, text=str(m['priority']),
                           font=FONT_BASE_BOLD, bg=BADGE_BG, fg=BADGE_FG,
                           padx=8, pady=2, bd=1, relief="solid", highlightthickness=0)
             pr.configure(borderwidth=1, highlightbackground=BADGE_BORDER, highlightcolor=BADGE_BORDER)
-            pr.grid(row=0, column=0, padx=(0, 10), sticky="w")
-            Tooltip(pr, "Priority (lower loads first)")
+            if SHOW_PRIORITY_BADGE:
+                pr.grid(row=0, column=0, padx=(0, 10), sticky="w")
+                Tooltip(pr, "Priority (lower loads first)")
 
             chevron = tk.Label(header, text=("▸" if collapsed else "▾"), fg="#9fb7d9",
                                bg=CARD_BG, font=FONT_TITLE_H2)
             chevron.grid(row=0, column=1, padx=(0, 6), sticky="w")
             chevron.bind("<Button-1>", lambda e, k=key: self._toggle_collapse(k))
+            chevron._is_mod_chevron = True  # marker for collapse updates
+
 
             title = ttk.Label(header, text=m["name"], style="Mods.Title.TLabel")
             title.grid(row=0, column=2, sticky="w")
@@ -682,7 +937,7 @@ class ModsPanel(ttk.Frame):
             if intro_text:
                 intro_lbl = ttk.Label(card, text=intro_text, style="Mods.Intro.TLabel",
                                       justify="left", wraplength=1)
-                intro_lbl.grid(row=1, column=0, sticky="w", pady=(2, 0))
+                intro_lbl.grid(row=1, column=1, sticky="w", pady=(2, 0))
 
             changes_lbl = None
             if changes_list:
@@ -690,7 +945,7 @@ class ModsPanel(ttk.Frame):
                 changes_lbl = ttk.Label(card, text=f"Changes:\n{bullets}",
                                         style="Mods.Changes.TLabel", justify="left", wraplength=1)
                 row_changes = 2 if intro_lbl is not None else 1
-                changes_lbl.grid(row=row_changes, column=0, sticky="w", pady=(6, 0))
+                changes_lbl.grid(row=row_changes, column=1, sticky="w", pady=(6, 0))
                 if collapsed:
                     changes_lbl.grid_remove()
 
@@ -700,8 +955,8 @@ class ModsPanel(ttk.Frame):
             if m.get("mod_version"):  meta_parts.append(f"Mod v{m['mod_version']}")
             if m.get("author"):       meta_parts.append(f"by {m['author']}")
             
-            #origin_label = m.get("origin")
-            #if origin_label: meta_parts.append(str(origin_label))
+            origin_label = m.get("origin")
+            if origin_label: meta_parts.append(str(origin_label))
             
             if meta_parts:
                 meta_lbl = ttk.Label(
@@ -710,12 +965,35 @@ class ModsPanel(ttk.Frame):
                 )
                 r = (3 if (intro_lbl and changes_lbl) else
                      2 if (intro_lbl and not changes_lbl) or (changes_lbl and not intro_lbl) else 1)
-                meta_lbl.grid(row=r, column=0, sticky="w", pady=(6, 0))
+                meta_lbl = None
+                meta_parts: List[str] = []
+                if m.get("game_version"): meta_parts.append(f"Game v{m['game_version']}")
+                if m.get("mod_version"):  meta_parts.append(f"Mod v{m['mod_version']}")
+                if m.get("author"):       meta_parts.append(f"by {m['author']}")
+                origin_label = m.get("origin")
+                if origin_label:
+                    meta_parts.append(str(origin_label))
+
+                # --- spacer row pushes footer to bottom (card height often comes from thumbnail) ---
+                spacer_row = (3 if (intro_lbl and changes_lbl) else
+                            2 if ((intro_lbl and not changes_lbl) or (changes_lbl and not intro_lbl)) else 1)
+
+                spacer = tk.Frame(card, bg=CARD_BG, bd=0, highlightthickness=0)
+                spacer.grid(row=spacer_row, column=1, sticky="nsew")
+                card.grid_rowconfigure(spacer_row, weight=1)
+                hover_children.append(spacer)
+
+                if meta_parts:
+                    meta_lbl = ttk.Label(
+                        card, text=" • ".join(meta_parts),
+                        style="Mods.Meta.TLabel", justify="left", wraplength=1
+                    )
+                    meta_lbl.grid(row=spacer_row + 1, column=1, sticky="sw", pady=(6, 0))
+
 
             # --- right column area ---
             right = tk.Frame(card, bg=CARD_BG, bd=0, highlightthickness=0)
-            right.grid(row=0, column=1, rowspan=2, sticky="ne", padx=(20, 0))
-            hover_children: List[tk.Widget] = []
+            right.grid(row=0, column=2, rowspan=10, sticky="ne", padx=(20, 0))
             Icon.bg_changed(right)
             
             # Toggle button
@@ -734,10 +1012,13 @@ class ModsPanel(ttk.Frame):
             )
             hover_children.append(btn_switch)
 
-            # Buttons
-            Icon.Button(right, "edit", command=lambda mm=m: self.edit_manifest(mm),
+            # Buttons            
+            btn_edit = Icon.Button(right, "edit", command=lambda mm=m: self.edit_manifest(mm),
                         tooltip="Edit mod files", pack={"side":"left", "padx":(0, 0)})
-            Icon.Button(right, "folder", command=lambda p=m["dir"]: self._open_dir(p),
+            try: btn_edit.bind("<Control-Button-1>", lambda e, p=m["dir"]: (self._open_replacements_py(p), "break"), add="+")
+            except Exception: pass
+
+            Icon.Button(right, "folder", command=lambda p=m["dir"]: FileManagement.Open(p),
                         tooltip="Open mod directory", pack={"side":"left", "padx":(10, 0)})
 
             link_url = str((m.get("raw") or {}).get("link", "")).strip()
@@ -754,8 +1035,8 @@ class ModsPanel(ttk.Frame):
             )
 
             self._apply_enabled_by_key(key, bool(m["enabled"]))
-            for w in (card, header, title, intro_lbl if intro_lbl else card,
-                      changes_lbl if changes_lbl else card, meta_lbl if meta_lbl else card, right):
+            for w in (card, thumb_lbl, header, title, intro_lbl if intro_lbl else card,
+                    changes_lbl if changes_lbl else card, meta_lbl if meta_lbl else card, right):
                 try:
                     w.bind("<Button-1>",         lambda e, k=key: self._on_card_press(e, k), add="+")
                     w.bind("<B1-Motion>",        self._on_card_motion, add="+")
@@ -774,6 +1055,7 @@ class ModsPanel(ttk.Frame):
         self._grid_cards()
 
     # ---------- IO ----------
+    
     def _open_dir(self, p: Path):
         try:
             if sys.platform.startswith("win"): os.startfile(str(p))  # type: ignore[attr-defined]
@@ -825,80 +1107,102 @@ class ModsPanel(ttk.Frame):
             return 100 + len(mods)
 
     # Mod creation window
+
+    # Mod creation window
     def add_new_mod(self):
         win = tk.Toplevel(self)
         win.withdraw()
-        win.title("Create new mod")
+        win.title("Create a new mod")
         win.configure(bg=self.palette["panel"])
-        win.geometry("700x600")
+        win.geometry("600x600")
         parent = self.winfo_toplevel()
         win.transient(parent)
         win.resizable(False, False)
 
         Titlebar.set_icon(win)
 
-        # Layout
-        frm = ttk.Frame(win, padding=12, style="Panel.TFrame"); frm.pack(fill=tk.BOTH, expand=True)
-        for i in range(2): frm.columnconfigure(i, weight=1 if i == 1 else 0)
+        # --- Buttons bar (ALWAYS visible at bottom) ---
+        btns = ttk.Frame(win, padding=(12, 8), style="Panel.TFrame")
+        btns.pack(side=tk.BOTTOM, fill=tk.X)
+        btns.columnconfigure(0, weight=1)
 
-        def dark_entry(parent, desc):
-            return PlaceholderEntry(parent, desc)
-        
-        
+        # --- Main layout (takes remaining space) ---
+        frm = ttk.Frame(win, padding=12, style="Panel.TFrame")
+        frm.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        for i in range(2):
+            frm.columnconfigure(i, weight=1 if i == 1 else 0)
 
         # Tips
-        tips = ttk.Label(frm, text="Make your mod with ease!\nHere you can create the basic frame of your mod. Fill in this fields so it can appear on the mod list.\nLater, you’ll be able to edit it using the mod editor.",
-                  foreground=META_FG, font=FONT_BASE_MINI, justify="left")               
+        tips = ttk.Label(
+            frm,
+            text="Make your mod with ease!\nHere you can create the basic frame of your mod. Fill in this fields so it can appear on the mod list. Later, you’ll be able to edit it using the mod editor.",
+            foreground=META_FG,
+            font=FONT_BASE_MINI,
+            justify="left"
+        )
         tips.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 10))
-        
+
         # Fields
         ttk.Label(frm, text="Name:").grid(row=1, column=0, sticky="w", pady=(4, 4))
-        e_name = dark_entry(frm, "Enter mod name..."); e_name.grid(row=1, column=1, sticky="ew", padx=(8, 0))
+        e_name = InputText(frm, "Enter mod name...")
+        e_name.grid(row=1, column=1, sticky="ew", padx=(8, 0))
 
         ttk.Label(frm, text="Game version:").grid(row=2, column=0, sticky="w", pady=(4, 4))
-        e_game = dark_entry(frm, "Enter current game version (although it doesn't really matter)..."); e_game.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(4,4))
+        e_game = InputText(frm, "Enter current game version...")
+        e_game.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
 
         ttk.Label(frm, text="Mod version:").grid(row=3, column=0, sticky="w", pady=(4, 4))
-        e_mod = dark_entry(frm, "eg. 1.0"); e_mod.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(4,4))
+        e_mod = InputText(frm, "eg. 1.0")
+        e_mod.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
 
         ttk.Label(frm, text="Link (URL):").grid(row=4, column=0, sticky="w", pady=(8, 4))
-        e_link = dark_entry(frm, "Enter your Steam Workshop link, or GitHub link..."); e_link.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(4,4))
+        e_link = InputText(frm, "Enter your Steam Workshop link, or GitHub link...")
+        e_link.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
 
         ttk.Label(frm, text="Author:").grid(row=5, column=0, sticky="w", pady=(4, 4))
-        e_author = dark_entry(frm, "Enter... you..."); e_author.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(4,4))
+        e_author = InputText(frm, "Enter... you")
+        e_author.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
 
         ttk.Label(frm, text="Description:").grid(row=6, column=0, sticky="nw", pady=(8, 4))
-        txt_desc = tk.Text(frm, height=6, wrap="word", bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
-                           relief="flat", highlightthickness=1, highlightbackground="#18334d")
-        txt_desc.grid(row=6, column=1, sticky="nsew", padx=(8, 0), pady=(4,4))
+        txt_desc = InputMultiline(frm, "Enter mod description...", height=2)
+        txt_desc.grid(row=6, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
+        txt_desc.canvas.configure(height=100)
+
 
         ttk.Label(frm, text="Changes:").grid(row=7, column=0, sticky="nw", pady=(8, 4))
-        txt_changes = tk.Text(frm, height=8, wrap="word", bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
-                              relief="flat", highlightthickness=1, highlightbackground="#18334d")
-        txt_changes.grid(row=7, column=1, sticky="nsew", padx=(8, 0), pady=(4,4))
-        frm.rowconfigure(7, weight=1)
+        txt_changes = InputMultiline(frm, "Enter changelist...", height=1)
+        txt_changes.grid(row=7, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
+        txt_changes.canvas.configure(height=200)
+        
 
-        hint = ttk.Label(frm, text="In your 'changes' write one item per line.",
-                         foreground=META_FG, font=FONT_BASE_MINI, justify="left")
+        frm.rowconfigure(6, weight=1)
+        frm.rowconfigure(7, weight=0)
+
+        hint = ttk.Label(
+            frm,
+            text="In your 'changes' write one item per line.",
+            foreground=META_FG,
+            font=FONT_BASE_MINI,
+            justify="left"
+        )
         hint.grid(row=8, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
 
         # Wrap text
         def _update_wrap(event=None):
-            w = max(200, frm.winfo_width() - 24) # margin
+            w = max(200, frm.winfo_width() - 24)  # margin
             tips.configure(wraplength=w)
             hint.configure(wraplength=w)
+
         frm.bind("<Configure>", _update_wrap)
         _update_wrap()
 
-
-
-        btns = ttk.Frame(win, padding=(12, 8), style="Panel.TFrame"); btns.pack(fill=tk.X)
-        btns.columnconfigure(0, weight=1)
-
+        # Save
         def _save_and_close():
             name = e_name.get().strip()
             if not name:
-                messagebox.showerror("Create new mod", "Name cannot be empty."); return
+                messagebox.showerror("Create new mod", "Name cannot be empty.")
+                return
 
             # prepare the folder ./mods/<name>
             dir_name = self._sanitize_dir(name)
@@ -919,24 +1223,36 @@ class ModsPanel(ttk.Frame):
                 "enabled": True,
                 "priority": self._next_priority()
             }
-            gv = e_game.get().strip(); mv = e_mod.get().strip()
-            lk = e_link.get().strip(); au = e_author.get().strip()
-            if gv: data["game_version"] = gv
-            if mv: data["mod_version"] = mv
+            gv = e_game.get().strip()
+            mv = e_mod.get().strip()
+            lk = e_link.get().strip()
+            au = e_author.get().strip()
+
+            if gv:
+                data["game_version"] = gv
+            if mv:
+                data["mod_version"] = mv
             if lk:
                 if not (lk.startswith("http://") or lk.startswith("https://")):
                     lk = "https://" + lk
                 data["link"] = lk
-            if au: data["author"] = au
+            if au:
+                data["author"] = au
 
             desc = txt_desc.get("1.0", "end-1c").strip()
-            if desc: data["description"] = desc
+            if desc:
+                data["description"] = desc
+
             ch_lines = [ln.rstrip() for ln in txt_changes.get("1.0", "end-1c").splitlines()]
             ch_clean = [ln.strip() for ln in ch_lines if ln.strip()]
-            if ch_clean: data["changes"] = ch_clean
+            if ch_clean:
+                data["changes"] = ch_clean
 
             try:
-                (target / "manifest.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+                (target / "manifest.json").write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8"
+                )
             except Exception as e:
                 messagebox.showerror("Create new mod", f"Failed to save the manifest:\n{e}")
                 return
@@ -944,10 +1260,11 @@ class ModsPanel(ttk.Frame):
             win.destroy()
             self.refresh()
 
-        btn_pack = {"side":"right", "padx":(0,8)}
+        # Buttons (already created btns frame above)
+        btn_pack = {"side": "right", "padx": (0, 8)}
         Button(btns, text="Create", command=_save_and_close, pack=btn_pack, type="special")
         btn_cancel = Button(btns, text="Cancel", command=win.destroy, pack=btn_pack)
-        
+
         def _cancel(_=None):
             try:
                 if btn_cancel.winfo_exists():
@@ -955,14 +1272,24 @@ class ModsPanel(ttk.Frame):
             except Exception:
                 pass
             return "break"
+
         win.bind("<Escape>", _cancel)
 
         try:
             win.update_idletasks()
+            # prevent clipping: window can't be smaller than required height
+            win.minsize(700, win.winfo_reqheight())
             Window.center_on_parent(win, parent)
         except Exception:
             pass
+
         win.deiconify()
+
+
+
+
+
+
 
     # ---------- Manifest Editor + Replacements ----------
     def edit_manifest(self, m: Dict[str, Any]):
@@ -1117,37 +1444,45 @@ class ModsPanel(ttk.Frame):
         tips.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
 
         # Fields
+        
         ttk.Label(left, text="Name:").grid(row=2, column=0, sticky="w", pady=(4, 4))
-        e_name = dark_entry(left); e_name.insert(0, name_val); e_name.grid(row=2, column=1, sticky="ew", padx=(8, 0))
+        e_name = InputText(left, "Enter mod name..."); e_name.set_text(name_val)
+        e_name.grid(row=2, column=1, sticky="ew", padx=(8, 0))
 
         ttk.Label(left, text="Game version:").grid(row=3, column=0, sticky="w", pady=(4, 4))
-        e_game = dark_entry(left); e_game.insert(0, game_ver_val); e_game.grid(row=3, column=1, sticky="ew", padx=(8, 0))
+        e_game = InputText(left, "Enter current game version..."); e_game.set_text(game_ver_val)
+        e_game.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
 
         ttk.Label(left, text="Mod version:").grid(row=4, column=0, sticky="w", pady=(4, 4))
-        e_mod = dark_entry(left); e_mod.insert(0, mod_ver_val); e_mod.grid(row=4, column=1, sticky="ew", padx=(8, 0))
+        e_mod = InputText(left, "Enter mod version..."); e_mod.set_text(mod_ver_val)
+        e_mod.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
 
         ttk.Label(left, text="Link (URL):").grid(row=5, column=0, sticky="w", pady=(8, 4))
-        e_link = dark_entry(left); e_link.insert(0, link_val); e_link.grid(row=5, column=1, sticky="ew", padx=(8, 0))
+        e_link = InputText(left, "Enter your Steam Workshop link, or GitHub link..."); e_link.set_text(link_val)
+        e_link.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
 
         ttk.Label(left, text="Author:").grid(row=6, column=0, sticky="w", pady=(4, 4))
-        e_author = dark_entry(left); e_author.insert(0, author_val); e_author.grid(row=6, column=1, sticky="ew", padx=(8, 0))
+        e_author = InputText(left, "Enter... you"); e_author.set_text(author_val)
+        e_author.grid(row=6, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
 
         ttk.Label(left, text="Description:").grid(row=7, column=0, sticky="nw", pady=(8, 4))
-        txt_desc = tk.Text(left, height=6, wrap="word", bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
-                           relief="flat", highlightthickness=1, highlightbackground="#18334d")
-        txt_desc.insert("1.0", desc_val); txt_desc.grid(row=7, column=1, sticky="nsew", padx=(8, 0))
+        txt_desc = InputMultiline(left, "Enter mod description...", height=2); txt_desc.set_text(desc_val)
+        txt_desc.grid(row=7, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
+        #txt_desc.canvas.configure(height=100)
 
         ttk.Label(left, text="Changes:").grid(row=8, column=0, sticky="nw", pady=(8, 4))
-        txt_changes = tk.Text(left, height=8, wrap="word", bg="#0b1722", fg="#ffffff", insertbackground="#ffffff",
-                              relief="flat", highlightthickness=1, highlightbackground="#18334d")
-        txt_changes.insert("1.0", changes_val)
-        txt_changes.grid(row=8, column=1, sticky="nsew", padx=(8, 0))
-        
-        # Hint
-        hint = ttk.Label(left, text="In your 'changes' write one item per line.", foreground=META_FG, font=FONT_BASE_MINI, justify="left")       
-        hint.grid(row=9, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        
-        left.rowconfigure(8, weight=1)        
+        txt_changes = InputMultiline(left, "Enter changelist...", height=1); txt_changes.set_text(changes_val)
+        txt_changes.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
+        #txt_changes.canvas.configure(height=200)
+
+        # Hint (match add_new_mod)
+        hint = ttk.Label(left, text="In your 'changes' write one item per line.",
+                        foreground=META_FG, font=FONT_BASE_MINI, justify="left")
+        hint.grid(row=9, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+
+        # Keep rows tight (match add_new_mod behavior)
+        left.rowconfigure(7, weight=3)
+        left.rowconfigure(8, weight=1)     
         
         # Wrap text
         def _update_wrap(event=None):

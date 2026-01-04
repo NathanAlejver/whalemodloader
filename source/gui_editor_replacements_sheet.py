@@ -12,11 +12,11 @@ def _ml_dbg(msg):
 from typing import Dict, List, Tuple, Any, Optional, Union
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import os, math, copy, itertools, traceback
+import os, math, copy, itertools, traceback, textwrap, sys, subprocess
 from gui_common import COLOR_PALETTE as COLOR, ICON_SIZE, FONTS
-from gui_common import Tooltip, VSeparator, PlaceholderEntry, Icon, Scrollable, Button, Window, Titlebar
-
-
+from gui_common import Tooltip, VSeparator, InputText, InputMultiline, Icon, Scrollable, Button, Window, Titlebar, FileManagement
+from pathlib import Path
+import ModLoader
 
 
 
@@ -94,8 +94,7 @@ def set_texts_enabled(enabled: bool, *texts: "tk.Text", hide_preview_on_disable:
             t.config(state="normal" if enabled else "disabled")
         except Exception:
             pass
-    
-    
+
     
 
 # ====== Toolkit ======
@@ -363,7 +362,7 @@ class EditorLineRepl(ttk.Frame):
         hdr = tk.Frame(top, bg=C_BG)
         hdr.pack(fill="x")
         tk.Label(hdr, text="Replace function lines", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        #tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
 
         add_tip(
             top, "Here you can override individual lines within a function. It works by surgically swapping vanilla code for your new version. "
@@ -388,7 +387,7 @@ class EditorLineRepl(ttk.Frame):
         
         
         
-        self.e_fun = PlaceholderEntry(footer_fn, "Enter function name...")
+        self.e_fun = InputText(footer_fn, "Enter function name...")
         self.e_fun.pack(side="left", fill="x", expand=True, pady=(8, 0))        
         self.e_fun.bind("<Return>", lambda e: (self._add_fun(), "break"))
         
@@ -714,13 +713,18 @@ class EditorLineRepl(ttk.Frame):
         key = self._get_key_for_index(fn, idx)
         if not key: return
         a, b = self.data[self.file][fn][idx]
+        a_fmt = _pretty_block_for_editor(a)
+        b_fmt = _pretty_block_for_editor(b)
+        # persist formatting immediately (so Save writes the pretty version)
+        self.data[self.file][fn][idx] = (a_fmt, b_fmt)
+
         self._ensure_editors_for_key(key)
         self._updating_from_code = True
         try:
             t_old, t_new = self._editors_by_key[key]
             self._show_editors_for_key(key)
-            t_old.delete("1.0","end"); t_old.insert("1.0", a)
-            t_new.delete("1.0","end"); t_new.insert("1.0", b)
+            t_old.delete("1.0","end"); t_old.insert("1.0", a_fmt)
+            t_new.delete("1.0","end"); t_new.insert("1.0", b_fmt)
             t_old.edit_reset(); t_old.edit_separator()
             t_new.edit_reset(); t_new.edit_separator()
         finally:
@@ -830,7 +834,7 @@ class EditorFunctionMappings(ttk.Frame):
         hdr = tk.Frame(top, bg=C_BG)
         hdr.pack(fill="x")
         tk.Label(hdr, text="Replace functions", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")        
+        #tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")        
         add_tip(top,
                 "This panel lets you replace entire functions (instead of individual lines of code). "
                 "It's an easy and fast solution, but keep in mind it limits compatibility potential. "
@@ -848,7 +852,7 @@ class EditorFunctionMappings(ttk.Frame):
         # Footer
         footer_fn = tk.Frame(left, bg=C_BG)
         footer_fn.pack(fill="x", pady=(6,4))        
-        self.e_newfun = PlaceholderEntry(footer_fn, "Enter function name...")
+        self.e_newfun = InputText(footer_fn, "Enter function name...")
         self.e_newfun.pack(side="left", fill="x", expand=True, pady=(8, 0))                    
                 
         # Button - add
@@ -865,12 +869,12 @@ class EditorFunctionMappings(ttk.Frame):
         
         # Textfield #1
         tk.Label(frm, text="Function name (no () needed)", bg=C_BG, fg=C_SUB).grid(row=0, column=0, sticky="w", pady=(0,4))
-        self.e_fun = PlaceholderEntry(frm, "e.g. SaveStartGameParam")
+        self.e_fun = InputText(frm, "e.g. SaveStartGameParam")
         self.e_fun.grid(row=1, column=0, sticky="ew")
         
         # Textfield #2
         tk.Label(frm, text="Filename (only name, no path)", bg=C_BG, fg=C_SUB).grid(row=2, column=0, sticky="w", pady=(8,4))
-        self.e_file = PlaceholderEntry(frm, "e.g. utilite.c")        
+        self.e_file = InputText(frm, "e.g. utilite.c")        
         self.e_file.grid(row=3, column=0, sticky="ew")
         
         # Button "browse"
@@ -1059,7 +1063,7 @@ class EditorGeneralPairs(ttk.Frame):
         hdr = tk.Frame(top, bg=C_BG)
         hdr.pack(fill="x")  
         tk.Label(hdr, text="Replace general lines", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")        
+        #tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")        
         add_tip(
             top,
             "Here you can replace lines of code which are outside of any function, e.g., when you want to change a declared variable. "
@@ -1154,9 +1158,14 @@ class EditorGeneralPairs(ttk.Frame):
         arr = self.data.setdefault(self.file, [])
         if not (0 <= idx < len(arr)): return
         a,b = arr[idx]; self._select(idx)
+        a_fmt = _pretty_block_for_editor(a)
+        b_fmt = _pretty_block_for_editor(b)
+        # persist formatting immediately (so Save writes the pretty version)
+        arr[idx] = (a_fmt, b_fmt)
+
         self._set_enabled(True)
-        self.t_old.delete("1.0","end"); self.t_old.insert("1.0", a); self.t_old.edit_reset(); self.t_old.edit_separator()
-        self.t_new.delete("1.0","end"); self.t_new.insert("1.0", b); self.t_new.edit_reset(); self.t_new.edit_separator()
+        self.t_old.delete("1.0","end"); self.t_old.insert("1.0", a_fmt); self.t_old.edit_reset(); self.t_old.edit_separator()
+        self.t_new.delete("1.0","end"); self.t_new.insert("1.0", b_fmt); self.t_new.edit_reset(); self.t_new.edit_separator()
 
     def _deselect(self):
         self._idx = None
@@ -1331,7 +1340,7 @@ class EditorAdditions(ttk.Frame):
         hdr = tk.Frame(top, bg=C_BG)
         hdr.pack(fill="x")  
         tk.Label(hdr, text="File additions", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        #tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
         add_tip(
             top,
             "This panel lets you add a new snippet of code at the beginning or the end of the file (which you can choose using the option below). "
@@ -1548,11 +1557,11 @@ class EditorFileMap(ttk.Frame):
         hdr = tk.Frame(top, bg=C_BG)
         hdr.pack(fill="x")
         tk.Label(hdr, text="Replace whole files", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+        #tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
         
         
         ttk.Label(self, text="Replacement filename:", font=FONT_BASE_BOLD).grid(row=1, column=0, sticky="e", pady=(10,0))        
-        self.e = PlaceholderEntry(self, "e.g. cabin.c (no path!)")
+        self.e = InputText(self, "e.g. cabin.c (no path!)")
         self.e.grid(row=1, column=1, sticky="ew", padx=(6,0), pady=(10,0))
         add_tip(
             top,
@@ -1602,12 +1611,39 @@ def _first_chars(s, n=40):
     return (s[:n] + "…") if len(s) > n else s
 
 
+# Normalize indentation for editor display/saving
+def _pretty_block_for_editor(s: Any) -> str:
+
+    if s is None:
+        return ""
+    s = str(s).replace("\r\n", "\n").replace("\r", "\n")
+    s = s.strip("\n")
+    s = s.replace("\t", "    ")
+    s = textwrap.dedent(s)
+
+    lines = [ln.rstrip() for ln in s.split("\n")]
+
+    # Optional switch/case prettifier (keeps previews readable)
+    if any(ln.lstrip().startswith(("case ", "default:")) for ln in lines):
+        out: list[str] = []
+        for ln in lines:
+            st = ln.strip()
+            if not st:
+                out.append("")
+            elif st.startswith(("case ", "default:", "break")):
+                out.append(st)
+            else:
+                out.append("    " + st)
+        lines = out
+
+    return "\n".join(lines)
 
 
 
 
 # ====== Public factory (window) ======
-def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_save=None):
+
+def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_save=None, game_root: Optional[Union[str, Path]] = None):
     working = payload    
     
     def _resolve_file_key(d: dict, fpath: str) -> str:
@@ -1641,7 +1677,31 @@ def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_sav
     
     Titlebar.set_icon(win)
 
-    nb = ttk.Notebook(win); nb.pack(fill="both", expand=True, padx=8, pady=8)    
+
+    # --- Notebook + path widget aligned with tabs (right side overlay) ---
+    
+    game_root = ModLoader.game_root
+    def _open_target_file():
+        abs_path = (game_root / fpath).resolve()
+        FileManagement.Open(abs_path, title="Open")
+
+    def _open_target_folder():
+        abs_path = (game_root / fpath).resolve()
+        FileManagement.OpenParentDir(abs_path, title="Open")
+            
+    nb_wrap = tk.Frame(win, bg=C_BG)
+    nb_wrap.pack(fill="both", expand=True, padx=8, pady=8)
+    nb = ttk.Notebook(nb_wrap)
+    nb.pack(fill="both", expand=True)
+
+
+    # Place a small widget on the same row as the notebook tabs (top-right)
+    tabbar_right = tk.Frame(nb_wrap, bg=C_BG)
+    tabbar_right.place(relx=1.0, x=-6, y=6, anchor="ne")
+    Icon.Button(tabbar_right, "folder", command=_open_target_folder, tooltip="Open file folder", pack={"side": "right", "padx": (8, 0)})
+    Icon.Button(tabbar_right, "file", command=_open_target_file, tooltip="Open file in text editor", pack={"side": "right", "padx": (8, 0)})
+    tk.Label(tabbar_right, text=str(fpath), font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
+    tabbar_right.lift()
 
     def add_tab(widget_factory, title: str):
         try:

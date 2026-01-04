@@ -3,16 +3,18 @@
 
 from __future__ import annotations
 from pathlib import Path
+import subprocess
 from typing import Dict, List, Tuple, Any, Optional
-import os
+import os, sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pprint
 import traceback
 from tkinter import ttk, messagebox, filedialog
+import ModLoader
 
 from gui_common import COLOR_PALETTE as COLOR, ICON_SIZE, FONTS
-from gui_common import Tooltip, VSeparator, PlaceholderEntry, Icon, Button, Scrollable, Window, Titlebar
+from gui_common import Tooltip, VSeparator, InputText, InputMultiline, Icon, Button, Scrollable, Window, Titlebar, FileManagement
 from gui_common import style_scrollbar
 
 # -------------------- Palette --------------------
@@ -123,10 +125,66 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     norm["FILE_REPLACEMENTS"] = frr_out
     return norm
 
+
+def _py_str(s: str, indent: int) -> str:
+    # multiline -> triple quotes (no indenting inner content)
+    if "\n" in s:
+        body = s.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Remove blank/whitespace-only lines at start and end (prevents "falling down")
+        lines = body.splitlines()
+        while lines and lines[0].strip() == "":
+            lines.pop(0)
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+
+        body = "\n".join(lines)
+
+        close_pad = " " * max(indent - 4, 0)
+        if body == "":
+            return "'''\n" + close_pad + "'''"
+
+        return "'''\n" + body + "\n" + close_pad + "'''"
+
+    return repr(s)
+
+def _py_dump(obj, indent: int = 0) -> str:
+    pad = " " * indent
+
+    if isinstance(obj, str):
+        return _py_str(obj, indent + 4)
+
+    if isinstance(obj, tuple):
+        if len(obj) == 2:
+            a, b = obj
+            return "(\n" + \
+                   f"{pad}    {_py_dump(a, indent + 4)},\n" + \
+                   f"{pad}    {_py_dump(b, indent + 4)},\n" + \
+                   f"{pad})"
+        return "(" + ", ".join(_py_dump(x, indent) for x in obj) + ("," if len(obj) == 1 else "") + ")"
+
+    if isinstance(obj, list):
+        if not obj:
+            return "[]"
+        items = ",\n".join(f"{pad}    {_py_dump(x, indent + 4)}" for x in obj)
+        return "[\n" + items + ",\n" + pad + "]"
+
+    if isinstance(obj, dict):
+        if not obj:
+            return "{}"
+        # keep insertion order (no sort)
+        lines = []
+        for k, v in obj.items():
+            kk = repr(k)
+            vv = _py_dump(v, indent + 4)
+            lines.append(f"{pad}    {kk}: {vv},")
+        return "{\n" + "\n".join(lines) + "\n" + pad + "}"
+
+    # fallback
+    return repr(obj)
+
 def _generate_py(data: Dict[str, Any]) -> str:
-    header = (
-        "# -*- coding: utf-8 -*-\n"
-    )
+    header = "# -*- coding: utf-8 -*-\n"
     parts: List[str] = []
     for key in [
         "LINE_REPLACEMENTS",
@@ -136,9 +194,10 @@ def _generate_py(data: Dict[str, Any]) -> str:
         "FILE_REPLACEMENTS",
     ]:
         obj = data.get(key, {})
-        parts.append(f"{key} = " + pprint.pformat(obj, indent=4, width=100, compact=False, sort_dicts=True))
+        parts.append(f"{key} = " + _py_dump(obj, indent=0))
         parts.append("\n")
     return header + "\n".join(parts)
+
 
 class AddFileDialog(tk.Toplevel):
     def __init__(self, master, game_root, on_ok):
@@ -331,11 +390,8 @@ class ReplacementsBrowser:
 
         # game_root from ModLoader (shared between GUI / CLI / exe)
         try:
-            import ModLoader
-
             # Prefer explicit game_root set in ModLoader
             base_dir = getattr(ModLoader, "game_root", None)
-
             if base_dir is None:
                 # Fallback: APP_DIR one level up
                 app_dir = getattr(ModLoader, "APP_DIR", None)
@@ -457,7 +513,7 @@ class ReplacementsBrowser:
         _update_wrap()
 
         # 3) Search + button
-        self.e_search = PlaceholderEntry(row_controls, "Filter files/functions...")
+        self.e_search = InputText(row_controls, "Filter files/functions...")
         self.e_search.pack(side="left", fill="x", expand=True, padx=(0, 6))
         self.e_search.bind("<KeyRelease>", lambda e: self._rebuild_cards())
         Icon.Button(row_controls, "add", command=self._add_entry, tooltip="Add file entry", pack={"side": "right", "padx": (6, 6)})
@@ -536,18 +592,14 @@ class ReplacementsBrowser:
 
     def _open_original_folder(self, fpath: str):
         abs_path = (self.game_root / fpath).resolve()
-        target = abs_path if abs_path.is_dir() else abs_path.parent
-        if target.exists():
-            try:
-                os.startfile(target)  # Windows
-            except Exception:
-                try:
-                    import subprocess
-                    subprocess.Popen(["xdg-open", str(target)])
-                except Exception:
-                    messagebox.showerror("Open", f"I can't open: {target}")
-        else:
-            messagebox.showerror("Open", f"The path does not exist:\n{target}")
+        FileManagement.OpenParentDir(abs_path, title="Open")
+
+    def _open_original_file(self, fpath: str):
+        abs_path = (self.game_root / fpath).resolve()
+        if not abs_path.is_file():
+            messagebox.showerror("Open", f"The file does not exist:\n{abs_path}")
+            return
+        FileManagement.Open(abs_path, title="Open")
 
     def _make_card(self, fpath: str) -> tk.Frame:
         key = fpath
@@ -565,9 +617,8 @@ class ReplacementsBrowser:
         header = tk.Frame(pad, bg=C_CARD, bd=0, highlightthickness=0)
         header.pack(fill="x", pady=(0, HEADER_BOTTOM_GAP))
         
-        Icon.Button(header, "file", pack={"side": "left", "padx": (0, 8)})
-
-        
+        from gui_editor_replacements_sheet import open_edit_sheet  
+        btn_file = Icon.Button(header, "file", command=lambda fp=fpath: self._open_original_file(fp), tooltip="Open file in text editor", pack={"side": "left", "padx": (0, 8)})        
 
         lbl_title = tk.Label(header, text=Path(fpath).name, bg=C_CARD, fg=C_TEXT,
                              font=TITLE, bd=0, highlightthickness=0)
@@ -577,11 +628,18 @@ class ReplacementsBrowser:
         right.pack(side="right")
     
         # Button - edit        
-        from gui_editor_replacements_sheet import open_edit_sheet        
+        def _save_and_refresh():
+            if self._save():
+                self._rebuild_cards()     
         btn_edit = Icon.Button(right, "edit",
-            command=lambda fp=fpath: open_edit_sheet(self.root, self.payload, fp),
+            command=lambda fp=fpath: open_edit_sheet(self.root, self.payload, fp, on_save=_save_and_refresh),
             tooltip="Edit replacements", pack={"side": "left", "padx": (8, 0)},
         )
+        btn_edit.bind("<Control-Button-1>", lambda e, fp=fpath: self._open_original_file(fp), add="+") #Ctrl+click to open file
+        
+        
+        
+        
         
         # Button - folder    
         btn_folder = Icon.Button(right, "folder",
