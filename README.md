@@ -24,12 +24,12 @@ WML works by **patching files** while keeping the original ones as a backup. It 
 1. Download [the latest release](https://github.com/NathanAlejver/whalemodloader/releases/)
 1. Unpack and place "WhaleModLoader" folder directly **into game room directory.** *(steamapps/common/Caribbean Legend/)*
 2. Launch .exe and click "RUN Modloader", as the first run creates vanilla backup files.
-3. Subscribe any **[ModLoader]** workshop item and refresh WML *(F5 or "Refresh mod list" button).*
+3. Subscribe any **[ModLoader]** workshop item and it should quickly appear on your mod list *(if not, press F5).*
 4. RUN again to patch.
 
-📌 If you want to quickly check how it works, you can subscribe my simple [Time Scale Mod](https://steamcommunity.com/sharedfiles/filedetails/?id=3634002757). If you can speed your game up to x8/x12, it means WML works!
+📌 If you want to quickly check how it works, you can subscribe my simple [Time Scale Mod](https://steamcommunity.com/sharedfiles/filedetails/?id=3634002757). If you can speed your game up to x8/x12, it means WML is installed correctly!
 
-📌 Each time you install or remove a mod, **you should RUN ModLoader to update your game files.** You should do it aswell if game version changes.
+📌 Each time you install or remove ANY mod, **you should RUN ModLoader to update your game files.** You should do it aswell if game version changes.
 
 📌 Contact and support: [Discord Server](https://discord.gg/GnsUpqNDv7)
 
