@@ -41,7 +41,7 @@ WML works by **patching files** while keeping the original ones as a backup. It 
 * [Time Scale Mod](https://steamcommunity.com/sharedfiles/filedetails/?id=3634002757)
 * [Skip Intro Movies](https://steamcommunity.com/sharedfiles/filedetails/?id=3634304321)
 * [More Vanguards](https://steamcommunity.com/sharedfiles/filedetails/?id=3637834490)
-* [Neutrality Under the Black Flag](https://steamcommunity.com/sharedfiles/filedetails/?id=3638997603) by [Vade](https://steamcommunity.com/profiles/76561198112048776)
+* [Neutrality Under the Black Flag](https://steamcommunity.com/sharedfiles/filedetails/?id=3638997603) (by [Vade](https://steamcommunity.com/profiles/76561198112048776))
 
 Coming soom:
 * Worldmap Expansions (new Islands: Providence, Bonaire and more in the future)
