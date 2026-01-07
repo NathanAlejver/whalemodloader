@@ -16,7 +16,7 @@ from gui_common import COLOR_PALETTE as COLOR, FONTS, ICON_SIZE
 from gui_common import QueueStream, Tooltip, Icon, Scrollable, Button, InputText, HSeparator, Window, Titlebar, FileManagement
 from gui_common import hide_console_on_windows, style_scrollbar
 from PIL import Image, ImageTk, ImageFilter, ImageOps
-import ModLoader, update_manager
+import ModLoader
 
 Titlebar.ensure_appid("ModLoaderGUI")
 
@@ -231,8 +231,9 @@ class ModLoaderApp(tk.Tk):
         self._bind_shortcuts()
         self._load_settings()
 
-        # Initial state of 'Restore vanilla files' based on backups
-        self.after(0, self._update_restore_button_state)
+        
+        #self.after(0, self._update_restore_button_state) # Initial state of 'Restore vanilla files' based on backups
+        self.after(0, self._startup_update_guard) # check Steam game updates
 
         # Center only on first run (no saved geometry/position)
         if not getattr(self, "_restored_geometry", False):
@@ -249,9 +250,13 @@ class ModLoaderApp(tk.Tk):
         # Polling / animation
         self.after(80, self._drain_log_queue)
         self.after(90, self._progress_tick)
+        self.after(0, self._refresh_buildid_label)
+        self.after(800, self._check_updates_async)
+
         
 
     # ---------- Style ----------
+    
     def _setup_style(self):
         self.style = ttk.Style(self)
         try:
@@ -264,7 +269,9 @@ class ModLoaderApp(tk.Tk):
         self.style.configure("Card.TFrame", background="#0a1828", relief="solid")
         self.style.configure("TLabel", background=self.panel, foreground=self.text_fg)
 
+
     # ---------- UI ----------
+    
     def _setup_ui(self):
         # Header (shared)
         header_frame = ttk.Frame(self, height=70)
@@ -361,32 +368,197 @@ class ModLoaderApp(tk.Tk):
 
         
         
-        
+        # RUN Button
         self.style.map("Run.TButton", background=[("active", self.accent_dark), ("pressed", self.accent_dark)])
         self.btn_run = ttk.Button(left_box, text="RUN ModLoader", command=self.on_run_clicked, style="Run.TButton")
         self.btn_run.pack(side=tk.LEFT)
         Tooltip(self.btn_run, "Run ModLoader (Ctrl+R)")
+        
+        status_wrap = ttk.Frame(left_box)
+        status_wrap.pack(side=tk.LEFT, padx=(10, 0), fill=tk.X, expand=True)
 
-        self.status_label = ttk.Label(left_box, text="Status: Idle", font=FONTS["base"])
-        self.status_label.pack(side=tk.LEFT, padx=(10, 0))
+        # Status label
+        self.status_label = ttk.Label(status_wrap, text="Status: Idle", font=FONTS["base"], width=20, anchor="w")
+        self.status_label.grid(row=0, column=0, sticky="w")
+
+        # Build label
+        self.buildid_label = ttk.Label(status_wrap, text="", font=FONTS["base_mini"], foreground=COLOR["meta"])
+        self.buildid_label.grid(row=0, column=1, sticky="w", padx=(12, 0))
+
+        # Update label (clickable)
+        
+        self.update_label = ttk.Label(status_wrap, text="", font=FONTS["title_h3"], foreground=COLOR["accent_green"], cursor="hand2")
+        self.update_label.grid(row=0, column=2, sticky="w", padx=(42, 0))
+        self.update_label.bind("<Button-1>", lambda e: self._open_update_page())
+        status_wrap.columnconfigure(2, weight=1)
+
+        status_wrap.columnconfigure(1, weight=1)
 
         # Right cluster: quick actions
         right_box = ttk.Frame(bottom_bar)
         right_box.grid(row=0, column=1, sticky="e")
         btn_pack = {"side":"left", "padx":(0,8)}
+
+        # BUTTON: Purge backup files
+        self.btn_purge_backups = Button(right_box, text="Purge backup files", command=self.on_purge_backups_clicked, pack=btn_pack, tooltip="Deletes backup files created by ModLoader (ALWAYS use after game update)")
         
-        #Button(right_box, text="Check updates", command=lambda: update_manager.check_and_update_gui(self), pack=btn_pack, tooltip="Check GitHub for updates and apply them")
-        Button(right_box, text="Purge backup files", command=self.on_purge_backups_clicked, pack=btn_pack, tooltip="Deletes backup files created by ModLoader (ALWAYS use after game update)")
+        # BUTTON: Restore vanilla files
         self.btn_factory_reset = Button(right_box, text="Restore vanilla files ▶", command=self.on_factory_reset_clicked, pack=btn_pack, tooltip="Resets your game to factory settings (Ctrl+Shift+R)")
+        self._update_restore_button_state()
 
 
         STEAM_URL = ModLoader.STEAM_URL
-        Icon.Button(right_box, "game", size=40,
-                    command= lambda: webbrowser.open(STEAM_URL),
-                    tooltip="Start the game", pack=btn_pack) 
-        
-        
-        
+        Icon.Button(right_box, "game", size=50, command= lambda: webbrowser.open(STEAM_URL), tooltip="Start the game", pack=btn_pack) 
+
+    def _load_logo(self, target_h: int = 96, method: str = "bicubic", supersample: float = 1.0, preblur: float = 0.0, unsharp: float = 0.0):
+        self._logo_img = None
+        self._logo_w = self._logo_h = 0
+        icons_dir = APP_DIR / "assets" / "icons"
+        p = icons_dir / "logo.png"
+        if not p.exists():
+            return
+
+        # Open and preserve alpha
+        im = Image.open(p).convert("RGBA")
+        src_w, src_h = im.size
+
+        # --- Pick resampling kernel
+        resample_map = {
+            "nearest": Image.Resampling.NEAREST,
+            "bilinear": Image.Resampling.BILINEAR,
+            "bicubic": Image.Resampling.BICUBIC,
+            "lanczos": Image.Resampling.LANCZOS,
+        }
+        resample = resample_map.get(method.lower(), Image.Resampling.LANCZOS)
+
+        # --- Compute final size and optional supersampled size
+        scale = target_h / src_h
+        ss = max(1.0, float(supersample))
+        # supersampled intermediate height
+        inter_h = max(1, int(round(target_h * ss)))
+        inter_w = max(1, int(round(src_w * (inter_h / src_h))))
+
+        # --- Optional pre-blur to soften jaggies (stronger AA feel)
+        if preblur > 0:
+            im = im.filter(ImageFilter.GaussianBlur(radius=float(preblur)))
+
+        # --- Upscale/downscale to intermediate (if supersample>1 it upscales)
+        if (src_w, src_h) != (inter_w, inter_h):
+            im = im.resize((inter_w, inter_h), resample=resample)
+
+        # --- Downscale from intermediate to final with high-quality kernel
+        if ss > 1.0:
+            im = im.resize((max(1, int(round(inter_w/ss))),
+                            max(1, int(round(inter_h/ss)))),
+                            resample=resample)
+
+        # --- Optional unsharp mask to recover crisp logo edges
+        if unsharp > 0:
+            # Map 0..1 to sensible UnsharpMask params
+            amount   = 50 + int(150 * min(unsharp, 1.0))   # 50..200
+            radius   = 0.4 + 1.1 * min(unsharp, 1.0)       # ~0.4..1.5
+            threshold= 0                                   # keep edges clean
+            im = im.filter(ImageFilter.UnsharpMask(radius=radius, percent=amount, threshold=threshold))
+
+        tkimg = ImageTk.PhotoImage(im)
+        self._logo_img = tkimg
+        self._logo_w, self._logo_h = tkimg.width(), tkimg.height()
+
+
+
+
+    # ---------- GITHUB UPDATE ---------
+    
+    def _open_update_page(self):
+        try:
+            url = getattr(self, "_update_url", None) or getattr(ModLoader, "GITHUB_RELEASES_LATEST", None)
+            if url:
+                webbrowser.open(url)
+        except Exception:
+            pass
+
+    def _check_updates_async(self):
+        def worker():
+            try:
+                info = ModLoader.check_github_update(force=False, min_interval_hours=12)
+            except Exception as e:
+                info = {"ok": False, "is_update": False, "error": str(e)}
+
+            def apply():
+                try:
+                    if not info.get("ok"):
+                        self.log_queue.put(("STDOUT", f"[WARN] GitHub update check failed: {info.get('error')}\n"))
+                        return
+
+                    if info.get("is_update"):
+                        tag = info.get("latest_tag") or "?"
+                        self._update_url = info.get("html_url")
+                        self.update_label.configure(text=f"New WML version is avaiable: {tag}")
+                        # Optional: one-time popup per tag
+                        try:
+                            st = ModLoader._load_state()
+                            last = st.get("github_last_notified_tag")
+                            if last != tag:
+                                st["github_last_notified_tag"] = tag
+                                ModLoader._save_state(st)
+                                if messagebox.askyesno("WML update available", f"New build is available: {tag}\n\nOpen GitHub release page?"):
+                                    self._open_update_page()
+                        except Exception:
+                            pass
+                    else:
+                        self.update_label.configure(text="")
+                except Exception:
+                    pass
+
+            self.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
+
+    # ---------- UPDATE GUARD ----------
+
+    def _startup_update_guard(self):
+        try:
+            ok, msg = ModLoader.preflight_check(mode="run")
+            if ok:
+                return
+
+            # Log banner into GUI console
+            self.log_queue.put(("STDERR", "\n" + "="*64 + "\n"))
+            self.log_queue.put(("STDERR", "[ERROR] STEAM UPDATE DETECTED — BACKUPS INVALID :(\n"))
+            self.log_queue.put(("STDERR", "[ERROR] Click 'Purge backup files' and RUN again.\n"))
+            self.log_queue.put(("STDERR", "="*64 + "\n\n"))
+
+            # Disable dangerous actions until purge            
+            self.btn_run.configure(state="disabled")
+            if hasattr(self, "btn_factory_reset"):
+                self.btn_factory_reset.set_enabled(False)
+
+            # Inform user immediately
+            try:
+                messagebox.showwarning("Steam update detected", msg)
+            except Exception:
+                pass
+
+            # Optional: status label
+            try:
+                self.status_label.configure(text="Status: Waiting for purge")
+            except Exception:
+                pass
+
+        except Exception:
+            # If anything fails, do not block app startup
+            return
+
+    def _has_backup_files(self) -> bool:
+        backup_dir = ModLoader.BACKUP_DIR
+        try:
+            return backup_dir.exists() and any(p.is_file() for p in backup_dir.rglob("*"))
+        except Exception:
+            return False
+
+    # ---------- CONSOLE ----------
         
     def _build_console(self, parent: ttk.Frame):
 
@@ -424,7 +596,7 @@ class ModLoaderApp(tk.Tk):
         self.find_entry.bind("<Shift-Return>", lambda e: self._find_nav(backwards=True))
 
         # Match case        
-        case_btn = Icon.Toggle(search_bar, name="case", size=ICON_SIZE*1.2, tooltip="Enable/disable match case (Alt+C)", variable=self.find_match_case,
+        Icon.Toggle(search_bar, name="case", size=ICON_SIZE*1.2, tooltip="Enable/disable match case (Alt+C)", variable=self.find_match_case,
             command=lambda state: self._apply_find(highlight_all=True, jump_first=False),
             pack={"side": "left", "padx": (0, 4)})        
 
@@ -480,7 +652,6 @@ class ModLoaderApp(tk.Tk):
 
         self.txt.tag_lower("FIND_HIT")
         self.txt.tag_raise("FIND_CUR")
- 
 
     def _setup_console_tags(self):
         """Configure Text tags for a clear, modern log color scheme."""
@@ -599,60 +770,6 @@ class ModLoaderApp(tk.Tk):
             t.tag_add("CODE", f"{start_idx}+{s}c", f"{start_idx}+{e+1}c")
             i = e + 1
 
-
-    def _load_logo(self, target_h: int = 96, method: str = "bicubic", supersample: float = 1.0, preblur: float = 0.0, unsharp: float = 0.0):
-        self._logo_img = None
-        self._logo_w = self._logo_h = 0
-        icons_dir = APP_DIR / "assets" / "icons"
-        p = icons_dir / "logo.png"
-        if not p.exists():
-            return
-
-        # Open and preserve alpha
-        im = Image.open(p).convert("RGBA")
-        src_w, src_h = im.size
-
-        # --- Pick resampling kernel
-        resample_map = {
-            "nearest": Image.Resampling.NEAREST,
-            "bilinear": Image.Resampling.BILINEAR,
-            "bicubic": Image.Resampling.BICUBIC,
-            "lanczos": Image.Resampling.LANCZOS,
-        }
-        resample = resample_map.get(method.lower(), Image.Resampling.LANCZOS)
-
-        # --- Compute final size and optional supersampled size
-        scale = target_h / src_h
-        ss = max(1.0, float(supersample))
-        # supersampled intermediate height
-        inter_h = max(1, int(round(target_h * ss)))
-        inter_w = max(1, int(round(src_w * (inter_h / src_h))))
-
-        # --- Optional pre-blur to soften jaggies (stronger AA feel)
-        if preblur > 0:
-            im = im.filter(ImageFilter.GaussianBlur(radius=float(preblur)))
-
-        # --- Upscale/downscale to intermediate (if supersample>1 it upscales)
-        if (src_w, src_h) != (inter_w, inter_h):
-            im = im.resize((inter_w, inter_h), resample=resample)
-
-        # --- Downscale from intermediate to final with high-quality kernel
-        if ss > 1.0:
-            im = im.resize((max(1, int(round(inter_w/ss))),
-                            max(1, int(round(inter_h/ss)))),
-                            resample=resample)
-
-        # --- Optional unsharp mask to recover crisp logo edges
-        if unsharp > 0:
-            # Map 0..1 to sensible UnsharpMask params
-            amount   = 50 + int(150 * min(unsharp, 1.0))   # 50..200
-            radius   = 0.4 + 1.1 * min(unsharp, 1.0)       # ~0.4..1.5
-            threshold= 0                                   # keep edges clean
-            im = im.filter(ImageFilter.UnsharpMask(radius=radius, percent=amount, threshold=threshold))
-
-        tkimg = ImageTk.PhotoImage(im)
-        self._logo_img = tkimg
-        self._logo_w, self._logo_h = tkimg.width(), tkimg.height()
 
 
 
@@ -900,28 +1017,25 @@ class ModLoaderApp(tk.Tk):
             self.status_label.configure(text="Status: Idle")
 
 
-
-    # Enable 'Restore vanilla files' only if backup dir has files.
+    # Enable 'Restore vanilla files' only if backup dir has *files*.
     def _update_restore_button_state(self) -> None:
-        
-        backup_dir = ModLoader.BACKUP_DIR
-        has_files = False
+        has_files = self._has_backup_files()     
+        state = True if has_files else False   
 
+        # Restore vanilla files
         try:
-            if backup_dir.exists():
-                # any file in the backup tree
-                for _ in backup_dir.rglob("*"):
-                    has_files = True
-                    break
-        except Exception:
-            has_files = False
-
-        state = "normal" if has_files else "disabled"
-        try:
-            if hasattr(self, "btn_factory_reset"):
-                self.btn_factory_reset.configure(state=state)
+            if hasattr(self, "btn_factory_reset") and self.btn_factory_reset:
+                self.btn_factory_reset.set_enabled(state)
         except Exception:
             pass
+
+        # Purge backup files
+        try:
+            if hasattr(self, "btn_purge_backups") and self.btn_purge_backups:
+                self.btn_purge_backups.set_enabled(state)
+        except Exception:
+            pass
+
 
 
 
@@ -929,7 +1043,12 @@ class ModLoaderApp(tk.Tk):
         self._start_worker(factory=False, purge_backups=False)
 
     def on_factory_reset_clicked(self):
-        ok = messagebox.askyesno("Factory Reset", "All your game files will be restored to vanilla! Are you sure?")
+        ok = messagebox.askyesno(
+            "Restore vanilla files", 
+                        "All your game files will be restored to vanilla!\n\n"
+                        "This option restores the game's original files from WML backups folder and removes all modded changes.\n"
+                        "Use this if you want to return to vanilla (includong your Workshop subscriptions) without reinstalling the game."
+                        "\n\nAre you sure?")
         if not ok:
             return
         self._start_worker(factory=True, purge_backups=False)
@@ -937,10 +1056,9 @@ class ModLoaderApp(tk.Tk):
     def on_purge_backups_clicked(self):
         ok = messagebox.askyesno(
             "Purge backup files",
-            "This will delete backup files created by ModLoader.\n"
-            "ALWAYS use this after Steam updates the game.\n\n"
-            "Are you sure?"
-        )
+                        "This will delete all stored backups so the ModLoader can rebuild them from the current game version.\n"
+                        "Use this after a Steam game update to avoid outdated backups."
+                        "\n\nAre you sure?")
         if not ok:
             return
         # Purge backup files only (no regular mod operations)
@@ -957,6 +1075,16 @@ class ModLoaderApp(tk.Tk):
         self.mods_count = 0
         self._collecting_mods = False
         self._redraw_header()
+
+        # Preflight: block unsafe runs after Steam update
+        mode = "purge" if purge_backups else ("factory" if factory else "run")
+        ok, msg = ModLoader.preflight_check(mode=mode)
+        if not ok:
+            try:
+                messagebox.showwarning("Steam update detected", msg)
+            except Exception:
+                pass
+            return
 
         self._set_controls_enabled(False)
         self._worker = threading.Thread(target=self._run_modloader_once, args=(factory, purge_backups), daemon=True)
@@ -1010,8 +1138,10 @@ class ModLoaderApp(tk.Tk):
             self.after(0, lambda: self.status_label.configure(text="Status: Done"))
             self.after(1200, lambda: self.status_label.configure(text="Status: Idle"))
 
-            # Refresh factory reset button depending on current backups
+            # Refreshes
             self.after(0, self._update_restore_button_state)
+            self.after(0, self._refresh_buildid_label)
+
 
             def _maybe_notify():
                 if self.err_count > 0:
@@ -1257,6 +1387,36 @@ class ModLoaderApp(tk.Tk):
     def _on_close(self):
         self._save_settings()
         self.destroy()
+
+    def _refresh_buildid_label(self):
+        try:
+            s = ModLoader.get_update_guard_status()
+            cur = s.get("steam_buildid_current")
+            stored = s.get("steam_buildid_stored")
+            changed = bool(s.get("buildid_changed"))
+            backups = bool(s.get("backups_present"))
+
+            if not cur:
+                self.buildid_label.configure(text="")
+                return
+
+            stored_txt = stored if stored else "—"
+            flag = ""
+            if changed and backups:
+                flag = "  |  UPDATE DETECTED"
+            elif changed:
+                flag = "  |  build changed"
+            else:
+                flag = "  |  OK"
+
+            #self.buildid_label.configure(text=f"Game build: {stored_txt}  → {cur}{flag}")
+            self.buildid_label.configure(text=f"Game build: {stored_txt}{flag}")
+            
+        except Exception:
+            try:
+                self.buildid_label.configure(text="")
+            except Exception:
+                pass
 
 
 # ---------- Entrypoint ----------

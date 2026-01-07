@@ -243,12 +243,20 @@ class AddFileDialog(tk.Toplevel):
         # status pill
         self.pill = tk.Label(frm, text="", bg=C_PILL_BG, fg=C_SUB, padx=10, pady=4)
         self.pill.grid(row=2, column=0, sticky="w")
-
-        # actions
+        
+        # Compact button
+        self.btn_view = tk.Label(frm, text="Compact view", bg=C_CARD, fg=C_SUB, padx=10, pady=6, cursor="hand2")
+        self.btn_view.grid(row=3, column=1, sticky="e", pady=(10,0))
+        
+        # Cancel button
         self.btn_cancel = tk.Label(frm, text="Cancel", bg=C_CARD, fg=C_SUB, padx=10, pady=6, cursor="hand2")
+        self.btn_cancel.grid(row=3, column=2, sticky="e", pady=(10,0))
+        
+        # Save button
         self.btn_ok     = tk.Label(frm, text="Add",    bg=C_PILL_BG_2, fg=C_YELLOW, padx=12, pady=6, cursor="arrow")
-        self.btn_cancel.grid(row=3, column=1, sticky="e", pady=(10,0))
-        self.btn_ok.grid(row=3, column=2, sticky="e", padx=(8,0), pady=(10,0))        
+        self.btn_ok.grid(row=3, column=3, sticky="e", padx=(8,0), pady=(10,0))        
+        
+        
         self.btn_cancel.bind("<Enter>", lambda e: self.btn_cancel.config(bg=C_CARD_HOVER))
         self.btn_cancel.bind("<Leave>", lambda e: self.btn_cancel.config(bg=C_CARD))        
         self.btn_ok.bind("<Enter>", lambda e: self._ok_hover(True))
@@ -427,6 +435,8 @@ class ReplacementsBrowser:
 
         self._cards: List[tk.Frame] = []
         self._card_refs: Dict[str, Dict[str, List[tk.Misc]]] = {}
+        self.compact_view = False
+
 
         self._build_ui()
         self.root.update_idletasks()
@@ -473,6 +483,32 @@ class ReplacementsBrowser:
         for ch in getattr(root, "winfo_children", lambda: [])():
             self._bind_wheel_relay_tree(ch)
 
+
+    def _update_scrollregion_clamped(self, *_):
+        try:
+            self.root.update_idletasks()
+            bbox = self.canvas.bbox("all")
+            if not bbox:
+                return
+            x0, y0, x1, y1 = bbox
+
+            # Clamp to (0,0) so you can't overscroll above the first card
+            w = max(x1, self.canvas.winfo_width())
+            h = max(y1, self.canvas.winfo_height())
+            self.canvas.configure(scrollregion=(0, 0, w, h))
+        except Exception:
+            pass
+
+
+    # ---------- View ----------
+
+    def toggle_compact_view(self, *_):
+        if not hasattr(self, "cards_frame"):
+            return
+        self.compact_view = not self.compact_view
+        self._rebuild_cards()
+
+
     # ---------- UI builder ----------
     def _build_ui(self):
         if self.is_embedded:
@@ -515,19 +551,30 @@ class ReplacementsBrowser:
         # 3) Search + button
         self.e_search = InputText(row_controls, "Filter files/functions...")
         self.e_search.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        self.e_search.bind("<KeyRelease>", lambda e: self._rebuild_cards())
-        Icon.Button(row_controls, "add", command=self._add_entry, tooltip="Add file entry", pack={"side": "right", "padx": (6, 6)})
-            
+        self.e_search.bind("<KeyRelease>", lambda e: self._rebuild_cards())      
+        
+        Icon.Button(row_controls, "add", command=self._add_entry, tooltip="Add file entry", pack={"side": "right", "padx": (0, 6)})
+        
         # Scroll area
         outer = Scrollable(self.root, bg=C_BG)
         outer.pack(fill="both", expand=True, padx=4, pady=(4,10))
         self.canvas = outer.canvas
+        
+        inner = getattr(outer, "inner", None)
+        if inner is None:
+            inner = getattr(outer, "inner_frame", None) or getattr(outer, "frame", None)
 
-        self.cards_frame = ttk.Frame(outer.inner, style="Panel.TFrame")
+        self.cards_frame = ttk.Frame(inner, style="Panel.TFrame")
         self.cards_frame.pack(fill="both", expand=True, padx=(0, 10))
+
+        # Clamp scrollregion (prevents overscroll above list)
+        self.cards_frame.bind("<Configure>", self._update_scrollregion_clamped, add="+")
+        self.canvas.bind("<Configure>", self._update_scrollregion_clamped, add="+")
 
 
         self._rebuild_cards()
+        self._update_scrollregion_clamped()
+        self._bind_wheel_relay_tree(self.cards_frame)
 
     # ---------- bg sync ----------
     def _register_card(self, key: str, widgets: List[tk.Misc]):
@@ -602,6 +649,20 @@ class ReplacementsBrowser:
         FileManagement.Open(abs_path, title="Open")
 
     def _make_card(self, fpath: str) -> tk.Frame:
+        lr  = self.payload["LINE_REPLACEMENTS"].get(fpath, {}) or {}
+        fr  = self.payload["FUNCTION_REPLACEMENTS"].get(fpath, {}) or {}
+        flr = self.payload["FILE_LINE_REPLACEMENTS"].get(fpath, []) or []
+        fa  = self.payload["FILE_ADDITIONS"].get(fpath, []) or []
+        frr = self.payload["FILE_REPLACEMENTS"].get(fpath, "") or ""
+
+        cnt_func_lines = sum(len(pairs or []) for pairs in lr.values())      # ile par line replace we wszystkich funkcjach
+        cnt_functions  = len(fr)                                             # ile function replacements
+        cnt_gen_lines  = len(flr)                                            # ile file line replacements
+        cnt_additions  = len(fa)                                             # ile additions
+        cnt_repl_files = 1 if str(frr).strip() else 0                        # czy jest file replacement dla tego pliku
+
+        total_changes = cnt_func_lines + cnt_functions + cnt_gen_lines + cnt_additions + cnt_repl_files
+        
         key = fpath
         card = tk.Frame(self.cards_frame, bg=C_CARD, bd=0, highlightthickness=0)
         card.pack(fill="x", pady=(0, CARD_OUTER_VPAD))
@@ -623,6 +684,32 @@ class ReplacementsBrowser:
         lbl_title = tk.Label(header, text=Path(fpath).name, bg=C_CARD, fg=C_TEXT,
                              font=TITLE, bd=0, highlightthickness=0)
         lbl_title.pack(side="left")
+
+        changes_chip = None
+        if self.compact_view:
+            changes_chip = tk.Frame(header, bg=C_PILL_BG, bd=0, highlightthickness=0)
+
+            tk.Label(
+                changes_chip, text="Changes:", bg=C_PILL_BG, fg=C_TEXT,
+                font=FONT_BASE_MINI, padx=8, pady=3, bd=0, highlightthickness=0
+            ).pack(side="left")
+
+            tk.Label(
+                changes_chip, text=str(total_changes), bg=C_PILL_BG, fg=C_YELLOW,
+                font=("Helvetica", 9, "bold"), padx=0, pady=3, bd=0, highlightthickness=0
+            ).pack(side="left", padx=(6, 8))
+
+            changes_chip.pack(side="left", padx=(10, 0))
+
+            Tooltip(
+                changes_chip,
+                f"Function lines: {cnt_func_lines}\n"
+                f"Functions: {cnt_functions}\n"
+                f"General lines: {cnt_gen_lines}\n"
+                f"Additions: {cnt_additions}\n"
+                f"Replaced files: {cnt_repl_files}"
+            )
+
 
         right = tk.Frame(header, bg=C_CARD, bd=0, highlightthickness=0)
         right.pack(side="right")
@@ -653,63 +740,55 @@ class ReplacementsBrowser:
             tooltip="Remove this entry", pack={"side": "left", "padx": (8, 0)},
         )      
 
-        folder = (str(Path(fpath).parent).replace("\\", "/") + "/") if Path(fpath).parent != Path(".") else "Game root"        
-        lbl_path = tk.Label(pad, text=folder, bg=C_CARD, fg=C_MUTED, font=FONT_BASE_MINI, bd=0, highlightthickness=0)
-        lbl_path.pack(anchor="w", pady=(0, SECTION_GAP))
+        if not self.compact_view:
+            folder = (str(Path(fpath).parent).replace("\\", "/") + "/") if Path(fpath).parent != Path(".") else "Game root"
+            lbl_path = tk.Label(pad, text=folder, bg=C_CARD, fg=C_MUTED, font=FONT_BASE_MINI, bd=0, highlightthickness=0)
+            lbl_path.pack(anchor="w", pady=(0, SECTION_GAP))
+        else:
+            lbl_path = None
 
-        # counters
-        chips = tk.Frame(pad, bg=C_CARD, bd=0, highlightthickness=0)
-        chips.pack(fill="x", pady=(0, SECTION_GAP))
 
-        lr   = self.payload["LINE_REPLACEMENTS"].get(fpath, {})
-        fr   = self.payload["FUNCTION_REPLACEMENTS"].get(fpath, {})
-        flr  = self.payload["FILE_LINE_REPLACEMENTS"].get(fpath, [])
-        fa   = self.payload["FILE_ADDITIONS"].get(fpath, [])
-        frr  = self.payload["FILE_REPLACEMENTS"].get(fpath, "")
+        chips = None
+        funcs_frame = None
 
-        cnt_func_lines = sum(len(v or []) for v in lr.values())
-        cnt_functions  = len(fr)
-        cnt_gen_lines  = len(flr)
-        cnt_additions  = len(fa)
-        cnt_repl_files = 1 if frr else 0
+        if not self.compact_view:
+            # counters
+            chips = tk.Frame(pad, bg=C_CARD, bd=0, highlightthickness=0)
+            chips.pack(fill="x", pady=(0, SECTION_GAP))
 
-        def add_chip(lbl, val):
-            wrap = tk.Frame(chips, bg=C_PILL_BG, bd=0, highlightthickness=0)
-            tk.Label(wrap, text=f"{lbl}:", bg=C_PILL_BG, fg=C_TEXT,
-                     font=FONT_BASE_MINI, padx=8, pady=3, bd=0, highlightthickness=0).pack(side="left")
-            tk.Label(wrap, text=str(val), bg=C_PILL_BG, fg=C_YELLOW,
-                     font=("Helvetica",9,"bold"), padx=0, pady=3, bd=0, highlightthickness=0).pack(side="left", padx=(6,8))
-            wrap.pack(side="left", padx=(0, CHIP_GAP)) 
-            Tooltip(wrap, "Modified elements number")
+            def add_chip(lbl, val):
+                wrap = tk.Frame(chips, bg=C_PILL_BG, bd=0, highlightthickness=0)
+                tk.Label(wrap, text=f"{lbl}:", bg=C_PILL_BG, fg=C_TEXT,
+                         font=FONT_BASE_MINI, padx=8, pady=3, bd=0, highlightthickness=0).pack(side="left")
+                tk.Label(wrap, text=str(val), bg=C_PILL_BG, fg=C_YELLOW,
+                         font=("Helvetica",9,"bold"), padx=0, pady=3, bd=0, highlightthickness=0).pack(side="left", padx=(6,8))
+                wrap.pack(side="left", padx=(0, CHIP_GAP))
+                Tooltip(wrap, "Modified elements number")
 
-        if cnt_func_lines: add_chip("Function lines", cnt_func_lines)
-        if cnt_functions:  add_chip("Functions",      cnt_functions)
-        if cnt_gen_lines:  add_chip("General lines",  cnt_gen_lines)
-        if cnt_additions:  add_chip("Additions",      cnt_additions)
-        if cnt_repl_files: add_chip("Replaced files", cnt_repl_files)
+            if cnt_func_lines: add_chip("Function lines", cnt_func_lines)
+            if cnt_functions:  add_chip("Functions",      cnt_functions)
+            if cnt_gen_lines:  add_chip("General lines",  cnt_gen_lines)
+            if cnt_additions:  add_chip("Additions",      cnt_additions)
+            if cnt_repl_files: add_chip("Replaced files", cnt_repl_files)
 
-        # function tags (first 6)
-        funcs_frame = tk.Frame(pad, bg=C_CARD, bd=0, highlightthickness=0)
-        funcs_frame.pack(fill="x")
-        if lr:
-            funcs_sorted = sorted(lr.keys())
-            max_show = 6
-            for fn in funcs_sorted[:max_show]:
-                tk.Label(funcs_frame, text=fn, bg=C_PILL_BG_2, fg=C_TEXT,
-                         padx=8, pady=3, font=FONT_BASE_MINI, bd=0, highlightthickness=0).pack(side="left", padx=(0, TAG_GAP))
-            extra = len(funcs_sorted) - max_show
-            if extra > 0:
-                tk.Label(funcs_frame, text=f"+{extra} more", bg=C_PILL_BG_2, fg=C_TEXT,
-                         padx=8, pady=3, font=FONT_BASE_MINI, bd=0, highlightthickness=0).pack(side="left", padx=(0, TAG_GAP))
+            # function tags (first 6)
+            funcs_frame = tk.Frame(pad, bg=C_CARD, bd=0, highlightthickness=0)
+            funcs_frame.pack(fill="x")
+            if lr:
+                funcs_sorted = sorted(lr.keys())
+                max_show = 6
+                for fn in funcs_sorted[:max_show]:
+                    tk.Label(funcs_frame, text=fn, bg=C_PILL_BG_2, fg=C_TEXT,
+                             padx=8, pady=3, font=FONT_BASE_MINI, bd=0, highlightthickness=0).pack(side="left", padx=(0, TAG_GAP))
+                extra = len(funcs_sorted) - max_show
+                if extra > 0:
+                    tk.Label(funcs_frame, text=f"+{extra} more", bg=C_PILL_BG_2, fg=C_TEXT,
+                             padx=8, pady=3, font=FONT_BASE_MINI, bd=0, highlightthickness=0).pack(side="left", padx=(0, TAG_GAP))
 
-        widgets = [card, pad, header, lbl_title, right, btn_edit, btn_folder, btn_remove, chips, funcs_frame]
-        self._register_card(key, widgets)
         bind_hover_tree(card)
-        self._sync_bg(key, C_CARD)
         self._bind_wheel_relay_tree(card)
         return card
-    
-    
+            
 
     # ---------- Validate / Save ----------
 

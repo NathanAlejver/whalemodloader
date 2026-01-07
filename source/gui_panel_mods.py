@@ -4,7 +4,7 @@
 from __future__ import annotations
 import re, sys, json, types, shutil, importlib.util, os, webbrowser, json
 from gui_common import style_scrollbar, COLOR_PALETTE as COLOR, ICON_SIZE, FONTS
-from gui_common import Tooltip, Button, Scrollable, Icon, HSeparator, Window, Titlebar, FileManagement, InputText, InputMultiline
+from gui_common import Tooltip, Button, Scrollable, Icon, HSeparator, Window, Titlebar, FileManagement, InputText, InputTextStatic ,InputMultiline
 from PIL import Image, ImageTk, ImageOps, ImageEnhance
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
@@ -41,6 +41,7 @@ FONT_BASE        = FONTS["base"]
 FONT_BASE_BOLD   = FONTS["base_bold"]
 FONT_BASE_MINI   = FONTS["base_mini"]
 
+COLLAPSE_MAX_LINES = 60
 
 MOD_THUMB_SIZE = 128  # square thumbnail size (px)
 MOD_THUMB_PADX = 12  # space between thumb and text
@@ -134,6 +135,14 @@ class ModsPanel(ttk.Frame):
         self._collapsed = {}
         self._load_collapsed_from_settings()
 
+        # --- auto refresh state ---
+        self._auto_refresh = True
+        self._watch_interval_ms = 1500
+        self._watch_after = None
+        self._pending_refresh = None
+        self._pending_snapshot = None
+        self._last_snapshot = None
+
         # --- top area ---
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -155,6 +164,7 @@ class ModsPanel(ttk.Frame):
         
         Icon.Button(title_row, "refresh", size=int(ICON_SIZE*1), command=self.refresh,
                     tooltip="Reload and redraw the mods list (F5)", pack={"side":"left", "padx":(10, 0)})
+        
         
         # Buttons
         def btn_grid(btn_column): return {"row": 0, "column": btn_column, "padx": (6, 0)}
@@ -188,6 +198,9 @@ class ModsPanel(ttk.Frame):
         self.mods_dir = self._get_mods_dir()
         self.cards: List[ttk.Frame] = []
         self.refresh()
+        
+        self._start_autorefresh()
+        self.bind("<Destroy>", lambda e: self._stop_autorefresh(), add="+")
         
         # binds
         def _on_ctrl_n(_=None):
@@ -254,7 +267,28 @@ class ModsPanel(ttk.Frame):
             return Path(__file__).resolve().parent / "mods"
 
     def _on_frame_configure(self):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # Keep the inner window anchored at (0,0) to prevent overscroll above the content
+        bbox = self.canvas.bbox(self.cards_frame_id)
+        if not bbox:
+            return
+
+        x0, y0, x1, y1 = bbox
+
+        # If the window drifted (e.g. due to layout quirks), snap it back
+        if x0 != 0 or y0 != 0:
+            try:
+                self.canvas.coords(self.cards_frame_id, 0, 0)
+            except Exception:
+                pass
+            bbox = self.canvas.bbox(self.cards_frame_id)
+            if bbox:
+                x0, y0, x1, y1 = bbox
+
+        # Clamp scrollregion to start at 0,0 (no blank area above)
+        w = max(x1, self.canvas.winfo_width())
+        h = max(y1, self.canvas.winfo_height())
+        self.canvas.configure(scrollregion=(0, 0, w, h))
+
 
     def _on_canvas_resize(self):
         bbox = self.canvas.bbox(self.cards_frame_id)
@@ -264,18 +298,61 @@ class ModsPanel(ttk.Frame):
 
     # ---------- opening replacements.py ----------
 
-    def _open_replacements_py(self, mod_dir: Path):
+
+    def _ensure_replacements_py(self, mod_dir: Path) -> Optional[Path]:
+        """
+        Ensure replacements.py exists for this mod.
+        If missing, create a minimal template in mod_dir/replacements.py.
+        Returns path to the found/created file, or None on fatal error.
+        """
         candidates = [
             mod_dir / "replacements.py",
             mod_dir / "files" / "replacements.py",
             mod_dir / "functions" / "replacements.py",
             mod_dir / "lines" / "replacements.py",
         ]
+
+        # If any known location already exists, use it
         for p in candidates:
-            if p.exists():
-                FileManagement.Open(p)
-                return
-        messagebox.showinfo("Replacements", "replacements.py not found in this mod. Whale is sad.")
+            try:
+                if p.exists() and p.is_file():
+                    return p
+            except Exception:
+                pass
+
+        # Otherwise create default one in the mod root
+        target = candidates[0]
+        template = (
+            "#!/usr/bin/env python3\n"
+            "# -*- coding: utf-8 -*-\n\n"
+            "\"\"\"Whale Mod Loader - replacements\n\n"
+            "If your mod had no replacements.py, WML generated this file automatically.\n"
+            "Fill dictionaries below to patch game files.\n"
+            "\"\"\"\n\n"
+            "# Function-level replacements (file -> function -> list of (find, replace, optional_label))\n"
+            "FUNCTION_REPLACEMENTS = {}\n\n"
+            "# Line-level replacements (file -> list of (find, replace, optional_label))\n"
+            "LINE_REPLACEMENTS = {}\n\n"
+            "# Whole-file replacements / redirects (file -> new_content or file_path)\n"
+            "FILE_REPLACEMENTS = {}\n"
+        )
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(template, encoding="utf-8")
+            return target
+        except Exception as e:
+            messagebox.showerror("Replacements", f"Failed to create replacements.py:\n{e}")
+            return None
+
+
+    def _open_replacements_py(self, mod_dir: Path):
+        p = self._ensure_replacements_py(mod_dir)
+        if not p:
+            return
+        FileManagement.Open(p)
+
+
 
     # --- wraplength ---
     def _update_wraplengths(self):
@@ -812,7 +889,7 @@ class ModsPanel(ttk.Frame):
                 intro_text, changes_list = self._split_description_fallback(intro_text)
 
             if collapsed:
-                intro_text = self._ellipsize(intro_text, 220)
+                intro_text = self._ellipsize(intro_text, COLLAPSE_MAX_LINES)
 
             try:
                 intro_w.configure(text=intro_text)
@@ -851,6 +928,118 @@ class ModsPanel(ttk.Frame):
         self._on_frame_configure()
         self._update_wraplengths()
         self._save_collapsed_to_settings()
+
+        # Snapshot of current discovered mods manifests: (path, mtime, size).
+        # This catches: new/deleted mods (manifest appears/disappears), manifest edits (mtime/size changes)
+    def _make_mods_snapshot(self):
+        sig = []
+        try:
+            roots = self._get_mod_roots()
+        except Exception:
+            roots = []
+
+        for root, _label in roots:
+            try:
+                if not root.exists():
+                    continue
+                for child in root.iterdir():
+                    if not child.is_dir():
+                        continue
+                    manifest = child / "manifest.json"
+                    if not manifest.exists():
+                        continue
+                    try:
+                        st = manifest.stat()
+                        sig.append((str(manifest).lower(), int(st.st_mtime), int(st.st_size)))
+                    except Exception:
+                        sig.append((str(manifest).lower(), 0, 0))
+            except Exception:
+                continue
+
+        sig.sort()
+        return tuple(sig)
+
+    def _can_autorefresh_now(self) -> bool:
+        try:
+            root = self.winfo_toplevel()
+            for w in root.winfo_children():
+                if isinstance(w, tk.Toplevel) and w.winfo_exists():
+                    try:
+                        if w.state() != "withdrawn":
+                            return False
+                    except Exception:
+                        return False
+        except Exception:
+            pass
+        return True
+
+    def _start_autorefresh(self):
+        self._stop_autorefresh()
+        self._last_snapshot = self._make_mods_snapshot()
+        if self._auto_refresh:
+            self._schedule_watch()
+
+    def _stop_autorefresh(self):
+        try:
+            if self._watch_after:
+                self.after_cancel(self._watch_after)
+        except Exception:
+            pass
+        self._watch_after = None
+
+        try:
+            if self._pending_refresh:
+                self.after_cancel(self._pending_refresh)
+        except Exception:
+            pass
+        self._pending_refresh = None
+        self._pending_snapshot = None
+
+    def _schedule_watch(self):
+        if not self._auto_refresh:
+            return
+        if not self.winfo_exists():
+            return
+        self._watch_after = self.after(self._watch_interval_ms, self._watch_tick)
+
+    def _watch_tick(self):
+        self._watch_after = None
+        if not self._auto_refresh or not self.winfo_exists():
+            return
+
+        snap = self._make_mods_snapshot()
+
+        # If changes happened:
+        if snap != self._last_snapshot:
+            # if we can't safely refresh now (e.g. editor window open), postpone
+            if not self._can_autorefresh_now():
+                self._pending_snapshot = snap
+            else:
+                self._last_snapshot = snap
+                # debounce refresh a bit (Steam may create files in bursts)
+                try:
+                    if self._pending_refresh:
+                        self.after_cancel(self._pending_refresh)
+                except Exception:
+                    pass
+                self._pending_refresh = self.after(250, self.refresh)
+
+        # If we postponed earlier and now it's safe, refresh once
+        if self._pending_snapshot is not None and self._can_autorefresh_now():
+            self._last_snapshot = self._pending_snapshot
+            self._pending_snapshot = None
+            try:
+                if self._pending_refresh:
+                    self.after_cancel(self._pending_refresh)
+            except Exception:
+                pass
+            self._pending_refresh = self.after(250, self.refresh)
+
+        self._schedule_watch()
+
+
+
+
 
     # ---------- render ----------
     def refresh(self):
@@ -931,7 +1120,7 @@ class ModsPanel(ttk.Frame):
             if not changes_list:
                 intro_text, changes_list = self._split_description_fallback(intro_text)
             if collapsed:
-                intro_text = self._ellipsize(intro_text, 220)
+                intro_text = self._ellipsize(intro_text, COLLAPSE_MAX_LINES)
 
             intro_lbl = None
             if intro_text:
@@ -997,19 +1186,32 @@ class ModsPanel(ttk.Frame):
             Icon.bg_changed(right)
             
             # Toggle button
-            en_var = tk.BooleanVar(value=bool(m.get("enabled", False)))
+            enabled0 = bool(m.get("enabled", False))
+            en_var = tk.BooleanVar(value=enabled0)
+
+            def _on_toggle_enabled(state, rk=key, mm=m):
+                new_val = bool(state)
+
+                # IMPORTANT: ignore spurious initial callback (state didn't change)
+                if bool(mm.get("enabled", False)) == new_val:
+                    self._apply_enabled_by_key(rk, new_val)
+                    return
+
+                mm["enabled"] = new_val
+                self._save_manifest(mm)
+                self._apply_enabled_by_key(rk, new_val)
+
             btn_switch = Icon.Toggle(
                 right,
                 name="switch",
                 variable=en_var,
                 tooltip="Enable/disable this mod",
-                command=lambda state, rk=key, mm=m: (
-                    mm.__setitem__("enabled", bool(state)),
-                    self._save_manifest(mm),
-                    self._apply_enabled_by_key(rk, bool(state))
-                ),
+                command=_on_toggle_enabled,
                 pack={"side": "left", "padx": (0, 10)}
             )
+
+
+
             hover_children.append(btn_switch)
 
             # Buttons            
@@ -1064,6 +1266,19 @@ class ModsPanel(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Open folder", f"Failed to open folder:\n{e}")
 
+    def _ack_autorefresh_snapshot(self):
+        try:
+            if hasattr(self, "_make_mods_snapshot"):
+                self._last_snapshot = self._make_mods_snapshot()
+            self._pending_snapshot = None
+            if getattr(self, "_pending_refresh", None):
+                try: self.after_cancel(self._pending_refresh)
+                except Exception: pass
+                self._pending_refresh = None
+        except Exception:
+            pass
+
+
     def _save_manifest(self, m: Dict[str, Any]):
         data = dict(m.get("raw") or {})
         data["name"] = m["name"]
@@ -1081,11 +1296,28 @@ class ModsPanel(ttk.Frame):
         else: data.pop("mod_version", None)
         try:
             m["manifest"].write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-            m["raw"] = data
+            m["raw"] = data            
+            self._ack_autorefresh_snapshot()
+            # If auto-watcher exists, mark current state as clean (avoid redundant refresh after our own writes)
+            try:
+                if hasattr(self, "_make_mods_snapshot"):
+                    self._last_snapshot = self._make_mods_snapshot()
+                if hasattr(self, "_pending_snapshot"):
+                    self._pending_snapshot = None
+                if hasattr(self, "_pending_refresh") and self._pending_refresh:
+                    try: self.after_cancel(self._pending_refresh)
+                    except Exception: pass
+                    self._pending_refresh = None
+            except Exception:
+                pass
+            
         except Exception as e:
             messagebox.showerror("Save manifest", f"Failed to save manifest:\n{e}")
 
     def _open_replacements(self, mod_dir: Path):
+        p = self._ensure_replacements_py(mod_dir)
+        if not p:
+            return
         try:
             ReplacementsBrowser(self.winfo_toplevel(), mod_dir)
         except Exception as e:
@@ -1142,6 +1374,10 @@ class ModsPanel(ttk.Frame):
             justify="left"
         )
         tips.grid(row=0, column=1, sticky="w", padx=(8, 0), pady=(0, 10))
+        
+        # Whale icon
+        whale_icon = Icon.Button(frm, "whale", size=int(60))      
+        whale_icon.grid(row=0, column=0, sticky="w", padx=(8, 0), pady=(4, 4))
 
         # Fields
         ttk.Label(frm, text="Name:").grid(row=1, column=0, sticky="w", pady=(4, 4))
@@ -1169,12 +1405,14 @@ class ModsPanel(ttk.Frame):
         txt_desc.grid(row=6, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
         txt_desc.canvas.configure(height=100)
 
-
         ttk.Label(frm, text="Changes:").grid(row=7, column=0, sticky="nw", pady=(8, 4))
         txt_changes = InputMultiline(frm, "Enter changelist...", height=1)
         txt_changes.grid(row=7, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
         txt_changes.canvas.configure(height=200)
-        
+
+        ttk.Label(frm, text="Thumbnail:").grid(row=8, column=0, sticky="w", pady=(4, 4))
+        e_thumbnail = InputTextStatic(frm, "Add thumbnail.png (or .jpg) file into mod directory.\nSize: 256x256")
+        e_thumbnail.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))        
 
         frm.rowconfigure(6, weight=1)
         frm.rowconfigure(7, weight=0)
@@ -1186,7 +1424,7 @@ class ModsPanel(ttk.Frame):
             font=FONT_BASE_MINI,
             justify="left"
         )
-        hint.grid(row=8, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        hint.grid(row=9, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
 
         # Wrap text
         def _update_wrap(event=None):
@@ -1200,66 +1438,69 @@ class ModsPanel(ttk.Frame):
         # Save
         def _save_and_close():
             name = e_name.get().strip()
-            if not name:
-                messagebox.showerror("Create new mod", "Name cannot be empty.")
-                return
-
-            # prepare the folder ./mods/<name>
-            dir_name = self._sanitize_dir(name)
-            target = self.mods_dir / dir_name
-            suffix = 1
-            while target.exists():
-                suffix += 1
-                target = self.mods_dir / f"{dir_name}_{suffix}"
+            self._stop_autorefresh()
             try:
-                target.mkdir(parents=True, exist_ok=False)
-            except Exception as e:
-                messagebox.showerror("Create new mod", f"Failed to create folder:\n{e}")
-                return
+                if not name:
+                    messagebox.showerror("Create new mod", "Name cannot be empty.")
+                    return
 
-            # manifest
-            data = {
-                "name": name,
-                "enabled": True,
-                "priority": self._next_priority()
-            }
-            gv = e_game.get().strip()
-            mv = e_mod.get().strip()
-            lk = e_link.get().strip()
-            au = e_author.get().strip()
+                # prepare the folder ./mods/<name>
+                dir_name = self._sanitize_dir(name)
+                target = self.mods_dir / dir_name
+                suffix = 1
+                while target.exists():
+                    suffix += 1
+                    target = self.mods_dir / f"{dir_name}_{suffix}"
+                try:
+                    target.mkdir(parents=True, exist_ok=False)
+                except Exception as e:
+                    messagebox.showerror("Create new mod", f"Failed to create folder:\n{e}")
+                    return
 
-            if gv:
-                data["game_version"] = gv
-            if mv:
-                data["mod_version"] = mv
-            if lk:
-                if not (lk.startswith("http://") or lk.startswith("https://")):
-                    lk = "https://" + lk
-                data["link"] = lk
-            if au:
-                data["author"] = au
+                # manifest
+                data = {
+                    "name": name,
+                    "enabled": True,
+                    "priority": self._next_priority()
+                }
+                gv = e_game.get().strip()
+                mv = e_mod.get().strip()
+                lk = e_link.get().strip()
+                au = e_author.get().strip()
 
-            desc = txt_desc.get("1.0", "end-1c").strip()
-            if desc:
-                data["description"] = desc
+                if gv:
+                    data["game_version"] = gv
+                if mv:
+                    data["mod_version"] = mv
+                if lk:
+                    if not (lk.startswith("http://") or lk.startswith("https://")):
+                        lk = "https://" + lk
+                    data["link"] = lk
+                if au:
+                    data["author"] = au
 
-            ch_lines = [ln.rstrip() for ln in txt_changes.get("1.0", "end-1c").splitlines()]
-            ch_clean = [ln.strip() for ln in ch_lines if ln.strip()]
-            if ch_clean:
-                data["changes"] = ch_clean
+                desc = txt_desc.get().strip()
+                if desc:
+                    data["description"] = desc
 
-            try:
-                (target / "manifest.json").write_text(
-                    json.dumps(data, indent=2, ensure_ascii=False),
-                    encoding="utf-8"
-                )
-            except Exception as e:
-                messagebox.showerror("Create new mod", f"Failed to save the manifest:\n{e}")
-                return
+                ch_lines = [ln.rstrip() for ln in txt_changes.get().splitlines()]
+                ch_clean = [ln.strip() for ln in ch_lines if ln.strip()]
+                if ch_clean:
+                    data["changes"] = ch_clean
 
-            win.destroy()
-            self.refresh()
+                try:
+                    (target / "manifest.json").write_text(
+                        json.dumps(data, indent=2, ensure_ascii=False),
+                        encoding="utf-8"
+                    )
+                except Exception as e:
+                    messagebox.showerror("Create new mod", f"Failed to save the manifest:\n{e}")
+                    return
 
+                win.destroy()
+                self.refresh()
+            finally:
+                self._start_autorefresh()
         # Buttons (already created btns frame above)
         btn_pack = {"side": "right", "padx": (0, 8)}
         Button(btns, text="Create", command=_save_and_close, pack=btn_pack, type="special")
@@ -1358,18 +1599,19 @@ class ModsPanel(ttk.Frame):
             if au: data["author"] = au
             else:  data.pop("author", None)
 
-            desc = txt_desc.get("1.0", "end-1c").strip()
+            desc = txt_desc.get().strip()
             if desc: data["description"] = desc
             else:    data.pop("description", None)
 
-            ch_lines = [ln.rstrip() for ln in txt_changes.get("1.0", "end-1c").splitlines()]
+            ch_lines = [ln.rstrip() for ln in txt_changes.get().splitlines()]
             ch_clean = [ln.strip() for ln in ch_lines if ln.strip()]
             if ch_clean: data["changes"] = ch_clean
             else:        data.pop("changes", None)
 
             try:
                 m["manifest"].write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-                m["raw"] = data
+                m["raw"] = data                
+                self._ack_autorefresh_snapshot()
                 m["name"] = name
                 m["description"] = data.get("description", "")
                 m["changes"] = data.get("changes", [])
@@ -1408,7 +1650,18 @@ class ModsPanel(ttk.Frame):
             except Exception:
                 pass
             return "break"
-        win.bind("<Escape>", _on_escape)
+        win.bind("<Escape>", _on_escape)        
+        
+        # Compact button
+        def _toggle_compact(_=None):
+            nonlocal repl_editor
+            try:
+                if repl_editor is not None:
+                    repl_editor.toggle_compact_view()
+            except Exception as e:
+                messagebox.showerror("Compact view", f"Failed to toggle compact view:\n{e}")
+            return "break"
+        self.btn_view = Button(btns, text="Compact view", command=_toggle_compact, pack=btn_pack)
 
         paned.pack(fill=tk.BOTH, expand=True, padx=(12, 0), pady=12)
   
@@ -1475,14 +1728,18 @@ class ModsPanel(ttk.Frame):
         txt_changes.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
         #txt_changes.canvas.configure(height=200)
 
+        ttk.Label(left, text="Thumbnail:").grid(row=9, column=0, sticky="w", pady=(4, 4))
+        e_thumbnail = InputTextStatic(left, "Add thumbnail.png (or .jpg) file into mod directory.\nSize: 256x256")
+        e_thumbnail.grid(row=9, column=1, sticky="ew", padx=(8, 0), pady=(4, 4))
+        
         # Hint (match add_new_mod)
         hint = ttk.Label(left, text="In your 'changes' write one item per line.",
                         foreground=META_FG, font=FONT_BASE_MINI, justify="left")
-        hint.grid(row=9, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        hint.grid(row=10, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
 
         # Keep rows tight (match add_new_mod behavior)
         left.rowconfigure(7, weight=3)
-        left.rowconfigure(8, weight=1)     
+        left.rowconfigure(8, weight=2)     
         
         # Wrap text
         def _update_wrap(event=None):
@@ -1496,12 +1753,19 @@ class ModsPanel(ttk.Frame):
         right = ttk.Frame(paned, padding=12)
         paned.add(right, minsize=460)
 
+        # Error if right panel is a piece of SHIT
         try:
             repl_editor = ReplacementsBrowser(self, m["dir"], embed_in=right)
         except Exception as e:
             messagebox.showerror("Replacements", f"Failed to build right panel:\n{e}")
             repl_editor = None
 
+        # enable/disable compact button depending on whether editor exists
+        try:
+            self.btn_view.button.configure(state=("normal" if repl_editor is not None else "disabled"))
+        except Exception:
+            pass
+        
         try:
             win.update_idletasks()
             Window.center_on_parent(win, parent)

@@ -1,6 +1,6 @@
 
 from __future__ import annotations
-import re, sys, json, types, shutil, importlib.util
+import re, sys, json, types, shutil, importlib.util, time
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any, Optional
@@ -26,11 +26,16 @@ settings_dir = APP_DIR / "settings"
 
 NAME = "Whale Mod Loader"
 AUTHOR = 'NathanAlejver'
-VERSION = 'BETA 0.1'
+VERSION = 'BETA 0.2'
 
 WORKSHOP_GAME_ID = '2230980'
 STEAM_URL = "steam://rungameid/" + WORKSHOP_GAME_ID
 
+
+GITHUB_REPO = "NathanAlejver/whalemodloader"
+GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASES_LATEST = f"https://github.com/{GITHUB_REPO}/releases/latest"
+    
     
 FOLDER_NAME = "WhaleModLoader"
 
@@ -41,7 +46,6 @@ BACKUP_DIR = APP_DIR / "assets" / "backups" / "original_game_files"
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 ERROR_COUNT = 0
 WARN_COUNT = 0
-
 
 
 
@@ -56,6 +60,243 @@ def log(msg: str) -> None:
     global WARN_COUNT
     if "[ERROR]" in msg:     ERROR_COUNT += 1        
     if "[WARN]" in msg:      WARN_COUNT += 1
+
+def log_banner_error(title: str, lines: list[str]) -> None:
+    log("[ERROR] " + "=" * 64)
+    log(f"[ERROR] {title}")
+    for ln in lines:
+        log(f"[ERROR] {ln}")
+    log("[ERROR] " + "=" * 64)
+
+
+
+# =====================================
+#               REPO CHECK UPDATE
+# =====================================
+
+# Turns strings like: 'BETA 0.2', 'v0.2.1', '0.3', 'RC 1.0' into a comparable tuple.
+def _parse_version_key(s: str) -> tuple:
+    s = (s or "").strip()
+    low = s.lower()
+
+    # qualifiers: alpha < beta < rc < final
+    q = ""
+    for cand in ("alpha", "beta", "rc"):
+        if cand in low:
+            q = cand
+            break
+    q_order = {"alpha": 0, "beta": 1, "rc": 2, "": 3}
+    qv = q_order.get(q, 1)
+
+    nums = [int(x) for x in re.findall(r"\d+", s)]
+    while len(nums) < 3:
+        nums.append(0)
+    return (qv, nums[0], nums[1], nums[2])
+
+# Dict: ok: bool, latest_tag: str|None, html_url: str|None, is_update: bool, error: str|None
+def check_github_update(force: bool = False, min_interval_hours: int = 12) -> dict:
+    
+    # Always have a dict, even if state loading fails
+    st = {}
+    try:
+        st = _load_state() or {}
+    except Exception:
+        st = {}
+
+    # --- DEV: force fake update (for testing) ---
+    if st.get("dev_force_update", False):
+        return {
+            "ok": True,
+            "latest_tag": "v999.0.0",
+            "html_url": GITHUB_RELEASES_LATEST,
+            "is_update": True,
+            "error": None
+        }
+
+
+    
+    # If repo not set, silently skip
+    if not GITHUB_REPO or "OWNER/REPO" in GITHUB_REPO:
+        return {"ok": False, "latest_tag": None, "html_url": None, "is_update": False, "error": "GITHUB_REPO not set"}
+
+    import datetime as dt
+    st = _load_state()
+    now_utc = int(dt.datetime.utcnow().timestamp()) if "dt" in globals() else None
+    try:
+        import time
+        now_utc = int(time.time())
+    except Exception:
+        now_utc = None
+
+    # cache gate
+    if not force:
+        last = int(st.get("github_last_check_utc", 0) or 0)
+        if last and (now_utc - last) < int(min_interval_hours * 3600):
+            latest_tag = st.get("github_latest_tag")
+            html_url = st.get("github_latest_url") or GITHUB_RELEASES_LATEST
+            is_update = bool(st.get("github_is_update", False))
+            return {"ok": True, "latest_tag": latest_tag, "html_url": html_url, "is_update": is_update, "error": None}
+
+    # Live request
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            GITHUB_API_LATEST,
+            headers={
+                "User-Agent": "WhaleModLoader",
+                "Accept": "application/vnd.github+json",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw) if isinstance(raw, str) else {}
+
+        latest_tag = str(data.get("tag_name") or "").strip() or None
+        html_url = str(data.get("html_url") or "").strip() or GITHUB_RELEASES_LATEST
+
+        if not latest_tag:
+            raise RuntimeError("No tag_name in GitHub response")
+
+        local_v = getattr(sys.modules[__name__], "VERSION", "")  # this module's VERSION
+        is_update = _parse_version_key(latest_tag) > _parse_version_key(str(local_v))
+
+        # store cache
+        if now_utc is not None:
+            st["github_last_check_utc"] = now_utc
+        st["github_latest_tag"] = latest_tag
+        st["github_latest_url"] = html_url
+        st["github_is_update"] = bool(is_update)
+        _save_state(st)
+
+        return {"ok": True, "latest_tag": latest_tag, "html_url": html_url, "is_update": bool(is_update), "error": None}
+
+    except Exception as e:
+        # don't spam logs, just return info
+        return {"ok": False, "latest_tag": None, "html_url": GITHUB_RELEASES_LATEST, "is_update": False, "error": str(e)}
+
+
+
+
+
+
+
+# =====================================
+#        STEAM UPDATE / BACKUP GUARD
+# =====================================
+
+STATE_PATH = APP_DIR / "assets" / "settings" / ".wml_state.json"
+STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _load_state() -> dict:
+    try:
+        if STATE_PATH.exists():
+            data = json.loads(STATE_PATH.read_text("utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def _save_state(data: dict) -> None:
+    try:
+        STATE_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def _steamapps_root_from_game_root(root: Path) -> Optional[Path]:
+    # Same style as your workshop lookup: walk parents and look for steamapps
+    try:
+        for anc in root.parents:
+            if anc.name.lower() == "steamapps":
+                return anc
+        # common/<Game> fallback
+        if root.parent.name.lower() == "common" and root.parent.parent.name.lower() == "steamapps":
+            return root.parent.parent
+    except Exception:
+        pass
+    return None
+
+def _read_buildid_from_appmanifest(steamapps: Path) -> Optional[str]:
+    # NOTE: WORKSHOP_GAME_ID is your appid here (2230980)
+    manifest = steamapps / f"appmanifest_{WORKSHOP_GAME_ID}.acf"
+    if not manifest.exists():
+        return None
+    try:
+        txt = manifest.read_text("utf-8", errors="ignore")
+        m = re.search(r'"buildid"\s*"(\d+)"', txt)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+def get_update_guard_status() -> dict:
+    steamapps = _steamapps_root_from_game_root(game_root)
+    current = _read_buildid_from_appmanifest(steamapps) if steamapps else None
+
+    st = _load_state()
+    stored = st.get("steam_buildid")
+
+    backups_present = False
+    try:
+        if BACKUP_DIR.exists():
+            backups_present = any(p.is_file() for p in BACKUP_DIR.rglob("*"))
+    except Exception:
+        backups_present = False
+
+    changed = bool(current and stored and str(current) != str(stored))
+
+    return {
+        "steam_buildid_current": current,
+        "steam_buildid_stored": stored,
+        "buildid_changed": changed,
+        "backups_present": backups_present,
+        "steamapps_found": bool(steamapps),
+    }
+
+def preflight_check(mode: str = "run") -> tuple[bool, str]:
+    """
+    mode: 'run' | 'factory' | 'purge'
+    - purge is always allowed (it deletes backups)
+    - run/factory are blocked if Steam build changed AND backups exist
+    """
+    s = get_update_guard_status()
+
+    # If we can't read buildid (non-steam install, weird path), do not block.
+    if not s["steam_buildid_current"]:
+        return True, ""
+
+    if mode in ("run", "factory"):
+        if s["buildid_changed"] and s["backups_present"]:
+            
+            msg = (
+                "Carribean Legend has been updated on Steam (buildid changed).\n\n"
+                "Your WML backups are from an older game version and are now unsafe to use. Click 'Purge backup files' and RUN again.\n\n"
+                f"Stored buildid:  {s['steam_buildid_stored']}\n"
+                f"Current buildid: {s['steam_buildid_current']}"
+            )     
+                   
+            log_banner_error(
+                "STEAM UPDATE DETECTED — BACKUPS INVALID",
+                [
+                    "Action required: click 'Purge backup files' and run again.",
+                    f"Stored buildid:  {s['steam_buildid_stored']}",
+                    f"Current buildid: {s['steam_buildid_current']}",
+                ],
+            )  
+                      
+            return False, msg
+
+    return True, ""
+
+def _sync_stored_buildid_to_current() -> None:
+    s = get_update_guard_status()
+    cur = s.get("steam_buildid_current")
+    if not cur:
+        return
+    data = _load_state()
+    if str(data.get("steam_buildid")) != str(cur):
+        data["steam_buildid"] = str(cur)
+        _save_state(data)
 
 
 
@@ -508,6 +749,8 @@ def purge_all_backups(backup_root: Path) -> None:
             log("[INFO] All backup files removed, backup directory deleted.")
     except Exception:
         pass
+    
+    _sync_stored_buildid_to_current()
 
 
 # Restore files from BACKUP_DIR when no enabled mod targets them anymore.
@@ -576,6 +819,14 @@ def main() -> None:
     if ws_root is None:
         log("[INFO] Steam Workshop content root NOT found - only local mods will be used.")
 
+    # Backup purge/replace
+    mode = "purge" if PURGE_BACKUPS_ONLY else ("factory" if FACTORY_RESET else "run")
+    ok, msg = preflight_check(mode=mode)
+    if not ok:
+        log("[ERROR] " + msg.replace("\n", " "))
+        print("")
+        return
+    _sync_stored_buildid_to_current()
 
     # 1) Discover mods
     mods = discover_all_mods(mods_dir, ws_root)

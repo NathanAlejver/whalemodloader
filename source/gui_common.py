@@ -133,8 +133,18 @@ INPUT_BG          = COLOR_PALETTE["input_bg"]
 INPUT_BORDER      = COLOR_PALETTE["input_bd"]
 COLOR             = COLOR_PALETTE
 
-
-
+# amount: 0..1 (0 = unchanged, 0.12 = slightly darker)
+def _darken_hex(hex_color: str, amount: float = 0.12) -> str:
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    r = int(h[0:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    r = max(0, int(r * (1.0 - amount)))
+    g = max(0, int(g * (1.0 - amount)))
+    b = max(0, int(b * (1.0 - amount)))
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 
@@ -846,6 +856,9 @@ class Button(tk.Frame):
         except Exception:
             pass
 
+
+
+
     # ------- convenience helpers -------
     def set_text(self, txt: str):
         try:
@@ -858,6 +871,11 @@ class Button(tk.Frame):
             self.button.configure(command=cmd)
         except Exception:
             pass
+        
+    # Enable/disable
+    def set_enabled(self, enabled: bool):
+        self.button.configure(state=("normal" if enabled else "disabled"))
+        self.button.configure(cursor=("hand2" if enabled else "arrow"))
 
     # Forward unknown attributes to the inner ttk.Button
     def __getattr__(self, item):
@@ -1252,7 +1270,49 @@ class InputText(ttk.Entry):
         if getattr(self, "_ext_var", None) is not None:
             self._ext_var.set("")
 
+class InputTextStatic(tk.Frame):
+    _seq = 0
 
+    def __init__(self, master, text: str, **kw):
+        fg   = kw.pop("fg",   COLOR["meta"])        # gray text
+        bg   = kw.pop("bg",   COLOR["input_bg"])    # background as input
+        font = kw.pop("font", FONTS["mono"])
+        pad  = kw.pop("padding", (8, 6))
+
+        border = kw.pop("bordercolor", _darken_hex(COLOR["border"], 0.15))
+        border_th = kw.pop("borderthickness", 1)
+
+        super().__init__(master, bg=border, highlightthickness=0, bd=0)
+
+        InputTextStatic._seq += 1
+        stylename = f"StaticEntryLike{InputTextStatic._seq}.TLabel"
+
+        style = ttk.Style(master)
+        style.theme_use("clam")
+        style.configure(
+            stylename,
+            padding=pad,
+            foreground=fg,
+            background=bg,
+            font=font,
+            relief="flat",
+            borderwidth=0,
+        )
+
+        self._label = ttk.Label(self, text=text, style=stylename, anchor="w")
+        # The outline is made by the Frame, so we move the Label by 1px (or border_th)
+        self._label.pack(fill="both", expand=True, padx=border_th, pady=border_th)
+
+        try:
+            self._label.configure(takefocus=0)
+        except tk.TclError:
+            pass
+
+    def set_text(self, text: str):
+        self._label.configure(text=text)
+
+    def get(self) -> str:
+        return str(self._label.cget("text"))
 
 class Icon:
     BASE_DIR = Path(__file__).resolve().parent / "assets" / "icons"
@@ -1271,6 +1331,8 @@ class Icon:
         "arrow_up": "arrow_up.png",
         "game": "game.png",
         "case": "case.png",
+        "compact": "compact.png",
+        "whale": "iconPNG.png"
     }
     _CACHE: dict[str, object] = {}
     _BG_REGISTRY: dict[int, WeakSet] = {}
@@ -1564,8 +1626,6 @@ class Icon:
         elif place:lbl.place(**place)
 
         return lbl
-    
-    
 
 class FileManagement:     
   

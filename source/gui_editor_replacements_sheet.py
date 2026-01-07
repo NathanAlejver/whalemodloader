@@ -857,8 +857,7 @@ class EditorFunctionMappings(ttk.Frame):
                 
         # Button - add
         self.plus_pair = Icon.Button(footer_fn, "add", command=self._new_function, 
-            tooltip="Add function key", pack={"side": "left", "padx": (8,0), "pady": (8,0)}
-)    
+            tooltip="Add function key", pack={"side": "left", "padx": (8,0), "pady": (8,0)})    
 
         VSeparator(self).grid(row=1, column=1, sticky="ns", padx=10)
 
@@ -902,6 +901,7 @@ class EditorFunctionMappings(ttk.Frame):
         self.e_fun.bind("<KeyRelease>", _rename_live, add="+")
         self.e_fun.bind("<Return>", lambda e: (_rename_live(), "break"))
 
+        self._skip_autoselect = False
         self._render()
 
     def _push(self, op, data):
@@ -1092,17 +1092,17 @@ class EditorGeneralPairs(ttk.Frame):
 
         mv = tk.Frame(self, bg=C_BG); mv.grid(row=3, column=0, sticky="ew", pady=(8,0))
 
+        self._skip_autoselect = False
         self._render()
 
         # Delete: Also from text, if no selection
         def _on_del(e=None):
-            fw=self.focus_get()
-            if isinstance(fw, tk.Text):
-                try: sel = bool(fw.tag_ranges("sel"))
-                except Exception: sel = False
-                if sel: return
+            fw = self.focus_get()
+            if isinstance(fw, (tk.Entry, tk.Text)):
+                return  # let Tk handle Delete inside the editor
             if self._idx is not None:
-                self._del(self._idx); return "break"
+                self._del(self._idx)
+                return "break"
         self.bind_all("<Delete>", _on_del, add="+")
         self.bind_all("<Control-z>", self._on_undo, add="+")
         self.bind_all("<Control-y>", self._on_redo, add="+")
@@ -1129,7 +1129,7 @@ class EditorGeneralPairs(ttk.Frame):
                             on_delete=lambda idx=i: self._del(idx),
                             on_select=lambda idx=i: self._select(idx))
             card.pack(fill="x", padx=(0,10), pady=6)
-        if pairs and self._idx is None:
+        if pairs and self._idx is None and not getattr(self, "_skip_autoselect", False):
             self._edit(0)
         elif self._idx is not None and 0 <= self._idx < len(pairs):
             self._select(self._idx)
@@ -1200,8 +1200,14 @@ class EditorGeneralPairs(ttk.Frame):
         self._refresh_keep(idx); _event_changed(self)
     def _raw_del(self, idx):
         arr = self.data.setdefault(self.file, [])
-        if 0<=idx<len(arr): arr.pop(idx)
-        self._idx=None; self._render(); _event_changed(self)
+        if 0 <= idx < len(arr):
+            arr.pop(idx)
+        self._idx = None
+        self._skip_autoselect = True
+        self._render()
+        self._skip_autoselect = False
+        self._deselect()
+        _event_changed(self)
     def _raw_swap(self, i,j):
         arr = self.data.setdefault(self.file, [])
         if 0<=i<len(arr) and 0<=j<len(arr): arr[i],arr[j] = arr[j],arr[i]
@@ -1375,6 +1381,7 @@ class EditorAdditions(ttk.Frame):
         tk.Label(ed, text="Text", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).grid(row=2, column=0, sticky="w")
         self.t = mk_text(ed, 8); self.t.grid(row=3, column=0, sticky="nsew"); self.t.config(state="disabled")
 
+        self._skip_autoselect = False
         self._render()
 
         def _mod(_e=None):
@@ -1389,13 +1396,12 @@ class EditorAdditions(ttk.Frame):
 
         # DELETE: works even if focus in Text, as long as no selection
         def _on_del(e=None):
-            fw=self.focus_get()
-            if isinstance(fw, tk.Text):
-                try: sel = bool(fw.tag_ranges("sel"))
-                except Exception: sel = False
-                if sel: return
+            fw = self.focus_get()
+            if isinstance(fw, (tk.Entry, tk.Text)):
+                return  # let Tk handle Delete inside the editor
             if self._idx is not None:
-                self._del(self._idx); return "break"
+                self._del(self._idx)
+                return "break"
         self.bind_all("<Delete>", _on_del, add="+")
         self.bind_all("<Control-z>", self._on_undo, add="+")
         self.bind_all("<Control-y>", self._on_redo, add="+")
@@ -1431,7 +1437,7 @@ class EditorAdditions(ttk.Frame):
                             on_select=lambda idx=i: self._select(idx))
             card.lbl_top.configure(fg="#9fd1ff")
             card.pack(fill="x", padx=(0,10), pady=6)
-        if self._arr() and self._idx is None:
+        if self._arr() and self._idx is None and not getattr(self, "_skip_autoselect", False):
             self._edit(0)
         elif self._idx is not None and 0 <= self._idx < len(self._arr()):
             self._select(self._idx)
@@ -1491,9 +1497,17 @@ class EditorAdditions(ttk.Frame):
     def _raw_insert(self, idx, val: AdditionItem):
         arr=self._arr(); arr.insert(idx,val); self._render_keep(idx); _event_changed(self)
     def _raw_del(self, idx):
-        arr=self._arr()
-        if 0<=idx<len(arr): arr.pop(idx)
-        self._idx=None; self._render(); _event_changed(self)
+        arr = self._arr()
+        if 0 <= idx < len(arr):
+            arr.pop(idx)
+
+        self._idx = None
+        self._skip_autoselect = True
+        self._render()
+        self._skip_autoselect = False
+
+        self._deselect()
+        _event_changed(self)
     def _raw_swap(self, i,j):
         arr=self._arr()
         if 0<=i<len(arr) and 0<=j<len(arr): arr[i],arr[j]=arr[j],arr[i]
