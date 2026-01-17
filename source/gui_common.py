@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import io, os, sys, math, subprocess
+import io, os, sys, math, subprocess, time, weakref, threading, re
 from pathlib import Path
 from tkinter import messagebox
 from typing import Optional, Tuple, Any, Callable, Union
@@ -13,11 +13,9 @@ import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.ttk as ttk
 from tkinter import ttk
-import threading
 from weakref import WeakSet
 import ctypes as ct
 from ctypes import wintypes
-import sys, time, weakref, threading
 from PIL import Image, ImageTk, ImageFilter
 import ModLoader
 
@@ -162,30 +160,7 @@ def hide_console_on_windows():
 
 
 
-# ---------------- Styles ----------------
-
-def style_scrollbar(root):
-    style = ttk.Style(root)
-    try: style.theme_use("clam")
-    except Exception: pass
-
-    style_name = "Custom.Vertical.TScrollbar"
-    style.configure(style_name,
-                    troughcolor=COLOR["scrollbar_bg"],     # rail
-                    background=COLOR["scrollbar_thumb"],   # thumb
-                    bordercolor=COLOR["scrollbar_bg"],
-                    lightcolor=COLOR["scrollbar_bg"],
-                    darkcolor=COLOR["scrollbar_bg"],
-                    arrowcolor=COLOR["text"],
-                    gripcount=0,
-                    troughrelief="flat",            # flat rail
-                    relief="flat",                  # flat thumb
-                    borderwidth=1,
-                    )
-    style.map(style_name,
-              background=[("active", COLOR["scrollbar_thumb_hover"])],
-              troughcolor=[("active", COLOR["scrollbar_bg"])])
-    return style_name
+# ---------------- Titlebar ----------------
 
 class Titlebar:
     _APPLIED: dict[int, tuple[str, str] | str] = {}
@@ -583,6 +558,287 @@ class Titlebar:
             pass
 
 
+# ---------------- Combo box ----------------
+
+def combobox_style(root):
+    style = ttk.Style(root)
+    style.theme_use("clam")
+
+    style_name = "ModLoader.TCombobox"
+    accent_combo = COLOR_PALETTE["desc"]
+
+    style.configure(style_name,
+        fieldbackground = COLOR_PALETTE["input_bg"],
+        background      = COLOR_PALETTE["input_bg"],
+        foreground      = accent_combo,
+        bordercolor     = COLOR_PALETTE["input_bg"],
+        lightcolor      = COLOR_PALETTE["input_bg"],
+        darkcolor       = COLOR_PALETTE["input_bg"],
+        arrowcolor      = accent_combo,
+        arrowsize       = 16,
+        padding         = (4, 6, 6, 4),
+        relief          = "flat",
+        borderwidth     = 0,
+        selectbackground = COLOR_PALETTE["input_bg"],
+        selectforeground = accent_combo,
+        focuscolor      = "",
+    )
+    
+    
+
+    style.map(style_name,
+              
+        # Default textfield
+        fieldbackground = [
+            ("readonly", "pressed", COLOR_PALETTE["panel_active"]),
+            ("readonly", "active",  COLOR_PALETTE["panel_hover"]),
+            ("readonly", "focus",   COLOR_PALETTE["panel_active"]),
+            ("readonly", "hover",   COLOR_PALETTE["panel_hover"]),
+            ("",                  COLOR_PALETTE["input_bg"]),
+            
+        ],
+        
+        # global background
+        background = [ 
+            ("readonly", "pressed", COLOR_PALETTE["panel_active"]),
+            ("readonly", "active",  COLOR_PALETTE["panel_hover"]),
+            ("readonly", "focus",   COLOR_PALETTE["panel_active"]),
+            ("readonly", "hover",   COLOR_PALETTE["panel_hover"]),
+            ("",                  COLOR_PALETTE["input_bg"]),
+        ],
+        bordercolor = [
+            ("pressed", COLOR_PALETTE["panel_active"]),
+            ("active",  COLOR_PALETTE["panel_hover"]),
+            ("focus",   COLOR_PALETTE["panel_active"]),
+            ("hover",   COLOR_PALETTE["panel_hover"]),
+            ("",                  COLOR_PALETTE["input_bg"]),
+        ],
+        arrowcolor = [
+            ("pressed", accent_combo),
+            ("active",  accent_combo),
+            ("focus",   accent_combo),
+            ("hover",   accent_combo),
+        ],
+    )
+
+    # Style the popdown listbox (tk.Listbox), not ttk style
+    root.option_add("*TCombobox*Listbox.font", FONTS["base_bold"])
+    root.option_add("*TCombobox*Listbox.background", COLOR_PALETTE["panel"])
+    root.option_add("*TCombobox*Listbox.foreground", COLOR_PALETTE["meta"])
+    root.option_add("*TCombobox*Listbox.selectBackground", COLOR_PALETTE["panel_hover"])
+    root.option_add("*TCombobox*Listbox.selectForeground", COLOR_PALETTE["text"])
+    root.option_add("*TCombobox*Listbox.padding", COLOR_PALETTE["text"])
+    root.option_add("*TCombobox*Listbox.borderWidth", 0)
+    root.option_add("*TCombobox*Listbox.relief", "flat")
+
+    # lista rozwijana
+    style.configure(f"{style_name}.Dropdown",
+        background = COLOR_PALETTE["panel"],
+        foreground = COLOR_PALETTE["text"],
+        bordercolor = COLOR_PALETTE["border"],
+    )
+
+    style.map(f"{style_name}.Dropdown",
+        background = [("hover", COLOR_PALETTE["panel_hover"])]
+    )
+
+    style.configure("ComboboxPopdownFrame",
+        background = COLOR_PALETTE["border"],
+        relief     = "flat",
+        borderwidth = 1,
+    )
+
+    return style_name
+
+class CustomCombo(ttk.Combobox):
+
+    STYLE_NAME = None
+    _global_bound = False
+    _instances = set()
+
+    def __init__(self, master, **kwargs):
+        if CustomCombo.STYLE_NAME is None:
+            CustomCombo.STYLE_NAME = combobox_style(master)
+
+        kwargs.setdefault("style", CustomCombo.STYLE_NAME)
+        kwargs.setdefault("font", FONTS["base_bold"])
+        kwargs.setdefault("justify", "right")
+        kwargs.setdefault("state", "readonly")
+        kwargs.setdefault("width", 14)
+
+        super().__init__(master, **kwargs)
+        
+        self._watch_popdown_job = None
+        self._watching_popdown = False
+
+        self._pre_click_value = None
+
+        CustomCombo._instances.add(self)
+        self.bind("<Destroy>", self._on_destroy, add="+")
+        
+        self.bind("<<ComboboxSelected>>", self._on_select, add="+")
+        self.bind("<FocusIn>", self._clear_selection, add="+")
+        self.bind("<KeyRelease>", self._clear_selection, add="+")
+
+        self.bind("<Button-1>", self._on_mouse_down, add="+")
+        self.bind("<ButtonRelease-1>", self._on_mouse_up, add="+")
+
+        self.bind("<FocusOut>", self._force_reset_visual, add="+")
+        self.bind("<Leave>", self._force_reset_visual, add="+")
+
+        root = self.winfo_toplevel()
+        if not CustomCombo._global_bound:
+            root.bind_all("<Button-1>", CustomCombo._global_click_defocus, add="+")
+            CustomCombo._global_bound = True
+
+    def _on_destroy(self, event=None):
+        try:
+            CustomCombo._instances.discard(self)
+        except Exception:
+            pass
+
+    def _on_mouse_down(self, event=None):
+        self._pre_click_value = self.get()
+        self._clear_selection()
+        self._begin_popdown_watch()
+
+    def _on_mouse_up(self, event=None):
+        self.after(120, self._defocus_if_nothing_changed)
+
+    def _defocus_if_nothing_changed(self):
+        if self.get() == self._pre_click_value:
+            self._force_reset_visual()
+            try:
+                self.master.focus_set()
+            except Exception:
+                pass
+        self._clear_selection()
+
+    @classmethod
+    def _global_click_defocus(cls, event):
+        try:
+            clicked = event.widget
+            clicked_path = str(clicked)
+
+            # If user clicked inside the popdown list -> do nothing here
+            # (selection handling happens there; closing popdown will trigger other resets)
+            if ".popdown" in clicked_path:
+                return
+
+            def do_reset():
+                # Reset ALL combos except the one we clicked on (if any)
+                for combo in list(cls._instances):
+                    try:
+                        if not combo.winfo_exists():
+                            cls._instances.discard(combo)
+                            continue
+
+                        if clicked is combo:
+                            continue
+
+                        # If popdown is open, leave it alone (closing popdown will clear states)
+                        if combo._is_popdown_open():
+                            def delayed_reset(c=combo):
+                                try:
+                                    if not c.winfo_exists():
+                                        return
+                                    if c._is_popdown_open():
+                                        c.after(60, delayed_reset)
+                                        return
+                                    c.state(["!active", "!pressed"])
+                                    c._clear_selection()
+                                except Exception:
+                                    pass
+                            combo.after(60, delayed_reset)
+                            continue
+
+                        combo.state(["!active", "!pressed"])
+                        combo._clear_selection()
+                    except Exception:
+                        pass
+
+            # Run after Tk finishes processing the click (state changes settle)
+            clicked.after_idle(do_reset)
+
+        except Exception:
+            pass
+
+
+    def _force_reset_visual(self, event=None):
+        if self._is_popdown_open():
+            return
+        try:
+            self.state(["!active", "!pressed"])
+        except Exception:
+            pass
+        self._clear_selection()
+
+    def _clear_selection(self, _=None):
+        try:
+            self.selection_clear()
+            self.icursor("end")
+        except Exception:
+            pass
+
+    def _is_popdown_open(self):
+        try:
+            pop = self.tk.call("ttk::combobox::PopdownWindow", self)
+            return int(self.tk.call("winfo", "ismapped", pop)) == 1
+        except Exception:
+            return False
+
+    def _on_select(self, event=None):
+        # After selection, dropdown closes; reset visual and optionally defocus
+        def finish():
+            try:
+                self.state(["!active", "!pressed"])
+            except Exception:
+                pass
+            self._clear_selection()
+            try:
+                self.master.focus_set()
+            except Exception:
+                pass
+
+        self.after(1, finish)
+
+    def _begin_popdown_watch(self):
+        # Cancel previous watcher if any
+        try:
+            if self._watch_popdown_job is not None:
+                self.after_cancel(self._watch_popdown_job)
+        except Exception:
+            pass
+
+        self._watching_popdown = True
+        self._watch_popdown_job = self.after(30, self._poll_popdown_close)
+
+    def _poll_popdown_close(self):
+        if not self._watching_popdown:
+            return
+
+        if self._is_popdown_open():
+            self._watch_popdown_job = self.after(60, self._poll_popdown_close)
+            return
+
+        # Popdown closed -> always clear the "open/active" look
+        self._watching_popdown = False
+        self._watch_popdown_job = None
+
+        try:
+            self.state(["!active", "!pressed"])
+        except Exception:
+            pass
+        self._clear_selection()
+
+        # If user clicked elsewhere, focus is already elsewhere; this just guarantees no sticky focus
+        try:
+            if self.winfo_toplevel().focus_get() is self:
+                self.master.focus_set()
+        except Exception:
+            pass
+
+
 
 
 
@@ -628,6 +884,53 @@ class Window:
 
 
 # ---------------- Scrollabe ----------------
+
+def style_scrollbar(root):
+    style = ttk.Style(root)
+    try: style.theme_use("clam")
+    except Exception: pass
+
+    style_name = "Custom.Vertical.TScrollbar"
+    style.configure(style_name,
+                    troughcolor=COLOR["scrollbar_bg"],     # rail
+                    background=COLOR["scrollbar_thumb"],   # thumb
+                    bordercolor=COLOR["scrollbar_bg"],
+                    lightcolor=COLOR["scrollbar_bg"],
+                    darkcolor=COLOR["scrollbar_bg"],
+                    arrowcolor=COLOR["text"],
+                    gripcount=0,
+                    troughrelief="flat",            # flat rail
+                    relief="flat",                  # flat thumb
+                    borderwidth=1,
+                    )
+    style.map(style_name,
+        fieldbackground=[
+            ("readonly", "pressed", COLOR_PALETTE["input_bg"]),
+            ("readonly", "active",  COLOR_PALETTE["input_bg"]),
+            ("readonly", "focus",   COLOR_PALETTE["input_bg"]),
+            ("readonly", "hover",   COLOR_PALETTE["panel_hover"]),
+            ("readonly",            COLOR_PALETTE["input_bg"]),
+        ],
+        background=[
+            ("readonly", "pressed", COLOR_PALETTE["input_bg"]),
+            ("readonly", "active",  COLOR_PALETTE["input_bg"]),
+            ("readonly", "focus",   COLOR_PALETTE["input_bg"]),
+            ("readonly", "hover",   COLOR_PALETTE["panel_hover"]),
+            ("readonly",            COLOR_PALETTE["input_bg"]),
+        ],
+        bordercolor=[
+            ("pressed", COLOR_PALETTE["input_bd"]),
+            ("active",  COLOR_PALETTE["input_bd"]),
+            ("focus",   COLOR_PALETTE["input_bd"]),
+            ("hover",   COLOR_PALETTE["accent_lightblue"]),
+            ("",        COLOR_PALETTE["input_bd"]),
+        ],
+        arrowcolor=[
+            ("hover", COLOR_PALETTE["accent_lightblue"]),
+            ("",      COLOR_PALETTE["meta"]),
+        ],
+    )
+    return style_name
 
 
 class Scrollable(tk.Frame):
@@ -690,7 +993,6 @@ class Scrollable(tk.Frame):
             try: self.canvas.configure(cursor=self._old_cursor)
             except Exception: pass
             self._old_cursor = None
-
 
 
 # ---------------- Button ----------------
@@ -781,7 +1083,7 @@ class Button(tk.Frame):
                  master,
                  text: str = "",
                  command=None,
-                 type: str = "default",
+                 type: str = 'default',
                  style: Optional[str] = None,
                  tooltip: Optional[str] = None,
                  padx: int = 1,
@@ -974,6 +1276,928 @@ def _safe_widget_bg(w: tk.Misc, fallback: str | None = None) -> str:
         return str(bg) if bg else fallback
     except Exception:
         return fallback
+
+
+# Shift-TAB error
+#    result = self.text.tk.call((self._text_orig_cmd,) + args)
+#   _tkinter.TclError: text doesn't contain any characters tagged with "sel"
+
+
+# Code editor
+class CodeEditor(tk.Frame):
+    def __init__(self, master, **kw):
+        fg   = kw.pop("fg",   COLOR["text"])
+        bg   = kw.pop("bg",   COLOR["input_bg"])
+        font = kw.pop("font", FONTS["mono"])
+        meta = kw.pop("meta", COLOR["meta"])
+
+        border_col = kw.pop("bordercolor", COLOR["border"])
+        focus_col  = kw.pop("focuscolor",  COLOR.get("focus", "#3d5566"))
+
+        radius    = kw.pop("radius", 2)
+        border_w  = kw.pop("borderwidth", 2)
+        inner_pad = kw.pop("innerpad", 6)
+
+        lineno_bg = kw.pop("lineno_bg", _darken_hex(bg, 0.10))
+        lineno_fg = kw.pop("lineno_fg", meta)
+        lineno_pad_x = kw.pop("lineno_pad_x", 10)
+
+        tab_width_spaces = int(kw.pop("tab_width", 4))
+        highlight_current_line = bool(kw.pop("highlight_line", True))
+        
+        # Height control
+        height_lines = kw.pop("height_lines", None)   # e.g. 6, 10
+        height_px    = kw.pop("height_px", None)      # e.g. 160
+        lock_height  = bool(kw.pop("lock_height", False))
+
+        # Optional 2-way sync
+        self._ext_var = kw.pop("textvariable", None)
+        self._sync_on = bool(self._ext_var is not None)
+
+        parent_bg = _safe_widget_bg(master, fallback=COLOR["panel"])
+        super().__init__(master, bg=parent_bg, bd=0, highlightthickness=0)
+
+        self._fg = fg
+        self._bg = bg
+        self._meta = meta
+        self._border_col = border_col
+        self._focus_col = focus_col
+        self._radius = radius
+        self._border_w = border_w
+        self._inner_pad = inner_pad
+
+        self._lineno_bg = lineno_bg
+        self._lineno_fg = lineno_fg
+        self._lineno_pad_x = lineno_pad_x
+
+        self._tabw = max(1, tab_width_spaces)
+        self._highlight_line = highlight_current_line
+
+        self._updating = False
+        self._hl_after = None
+        self._ln_after = None
+
+        # make sure border properly draws
+        # self.after_idle(lambda: self._redraw_border(self._border_col))
+
+        # Outer canvas for rounded border
+        self.canvas = tk.Canvas(self, bd=0, highlightthickness=0, relief="flat", bg=parent_bg)
+        self._lock_height = lock_height
+        self.canvas.pack(fill=("x" if lock_height else "both"), expand=(False if lock_height else True))
+
+        # Inner container inside the border
+        self.inner = tk.Frame(self.canvas, bg=bg, bd=0, highlightthickness=0)
+        self._win_id = self.canvas.create_window(0, 0, window=self.inner, anchor="nw")
+
+        # Left: line numbers, Right: text
+        self.gutter = tk.Canvas(
+            self.inner, bd=0, highlightthickness=0,
+            bg=self._lineno_bg, width=48
+        )
+
+        self.text = tk.Text(
+            self.inner,
+            wrap="none",
+            font=font,
+            fg=fg,
+            bg=bg,
+            insertbackground=fg,
+            selectbackground=COLOR_PALETTE["accent_blue"],
+            selectforeground=COLOR_PALETTE["special_fg"],
+            bd=0,
+            borderwidth=0,
+            highlightthickness=0,
+            undo=True,
+            autoseparators=True,
+            maxundo=-1,
+        )
+
+        # Scrollbars        
+        self._install_text_proxy()
+        style_name = style_scrollbar(self)
+        self.vbar = ttk.Scrollbar(self.inner, orient="vertical", command=self._yview, style=style_name)
+        self.text.configure(yscrollcommand=self._on_text_yscroll)
+
+        # Layout
+        self.gutter.grid(row=0, column=0, sticky="ns")
+        self.text.grid(row=0, column=1, sticky="nsew")
+        self.vbar.grid(row=0, column=2, sticky="ns")
+
+        self.inner.grid_rowconfigure(0, weight=1)
+        self.inner.grid_columnconfigure(1, weight=1)
+
+        # Configure Text tab width
+        try:
+            f = tkfont.Font(font=font)
+            tab_px = f.measure(" " * self._tabw)
+            self.text.configure(tabs=(tab_px,))
+        except Exception:
+            pass
+
+        # Border draw
+        def _redraw(outline_color: str):
+            self.canvas.delete("field")
+            w = self.canvas.winfo_width()
+            h = self.canvas.winfo_height()
+            if w <= 2 or h <= 2:
+                return
+
+            _canvas_round_rect(
+                self.canvas,
+                1, 1,
+                w - 1, h - 1,
+                r=self._radius,
+                fill=self._bg,
+                outline=outline_color,
+                width=self._border_w,
+                tags=("field",)
+            )
+
+            pad = self._border_w + self._inner_pad
+            self.canvas.coords(self._win_id, pad, pad)
+            self.canvas.itemconfigure(self._win_id, width=max(0, w - pad * 2), height=max(0, h - pad * 2))
+
+        self._redraw_border = _redraw
+        def _redraw_when_ready():
+            try:
+                w = self.canvas.winfo_width()
+                h = self.canvas.winfo_height()
+                if w <= 2 or h <= 2:
+                    self.after(16, _redraw_when_ready)  # spróbuj za chwilę
+                    return
+                self._redraw_border(self._border_col)
+            except Exception:
+                pass
+
+        # gdy widget pojawi się na ekranie
+        self.canvas.bind("<Map>", lambda e: _redraw_when_ready(), add="+")
+        self.bind("<Map>", lambda e: _redraw_when_ready(), add="+")
+
+        # oraz na starcie
+        self.after_idle(_redraw_when_ready)
+        
+        #self.canvas.bind("<Configure>", lambda e: _redraw(self._border_col), add="+")
+        #self.after_idle(lambda: self._redraw_border(self._border_col))
+
+        # Focus handling (border color)
+        def _focus_in(_=None):
+            _redraw(self._focus_col)
+            if self._highlight_line:
+                self._update_current_line()
+        def _focus_out(_=None):
+            _redraw(self._border_col)
+            if self._highlight_line:
+                self.text.tag_remove("current_line", "1.0", "end")
+
+
+        self.text.bind("<FocusIn>", _focus_in, add="+")
+        self.text.bind("<FocusOut>", _focus_out, add="+")
+        self.after(0, lambda: _redraw(self._border_col))
+
+        # Keybinds
+        self.text.bind("<Tab>", self._on_tab, add="+")
+        self.text.bind("<Return>", self._on_return, add="+")
+        self.text.bind("<KeyRelease>", self._on_key_release, add="+")
+        self.text.bind("<ButtonRelease-1>", lambda e: self._after_cursor_move(), add="+")
+        self.text.bind("<Control-BackSpace>", self._on_ctrl_backspace)
+        
+        # Scroll update
+        self.text.bind("<MouseWheel>", lambda e: self._after_scroll(), add="+")  # Windows
+        self.text.bind("<Button-4>", lambda e: self._after_scroll(), add="+")    # Linux
+        self.text.bind("<Button-5>", lambda e: self._after_scroll(), add="+")
+
+        # Horizontal scroll (Shift + Wheel)
+        self.text.bind("<Shift-MouseWheel>", self._on_shift_wheel_xscroll, add="+")
+        self.text.bind("<Shift-Button-4>", self._on_shift_wheel_xscroll, add="+")
+        self.text.bind("<Shift-Button-5>", self._on_shift_wheel_xscroll, add="+")
+
+        # Gutter redraw triggers
+        self.text.bind("<<Change>>", lambda e: self._schedule_line_numbers(), add="+")
+        self.text.bind("<Configure>", lambda e: self._schedule_line_numbers(), add="+")
+        self.text.bind("<Expose>", lambda e: self._schedule_line_numbers(), add="+")
+        
+        # Ctrl+Shift+Left/Right: keep selection inside the current line (no jumping to prev/next line)
+        self.text.bind("<Control-Shift-Left>",  self._on_ctrl_shift_left,  add="+")
+        self.text.bind("<Control-Shift-Right>", self._on_ctrl_shift_right, add="+")
+
+        def _on_change(_e=None):
+            self._schedule_line_numbers()
+            if self._highlight_line:
+                self._update_current_line()
+            self._schedule_highlight()
+        self.text.bind("<<Change>>", _on_change, add="+")
+
+        # Tags (colors)
+        self._init_tags()
+
+        # First paint
+        self._schedule_line_numbers()
+        self._schedule_highlight()
+
+        # Optional 2-way StringVar sync
+        if self._sync_on:
+            def _on_ext_change(*_):
+                if self._updating:
+                    return
+                self._updating = True
+                try:
+                    self.set_text(self._ext_var.get())
+                finally:
+                    self._updating = False
+
+            def _sync_to_var(_=None):
+                if self._updating:
+                    return
+                self._updating = True
+                try:
+                    self._ext_var.set(self.get())
+                finally:
+                    self._updating = False
+
+            try:
+                self._ext_var.trace_add("write", _on_ext_change)
+            except Exception:
+                pass
+
+            for seq in ("<KeyRelease>", "<<Paste>>", "<<Cut>>"):
+                self.text.bind(seq, _sync_to_var, add="+")
+            _on_ext_change()
+        self.text.tag_raise("sel")
+        # Apply initial height if requested
+        if height_px is not None:
+            self.set_height_px(height_px, lock=True)
+        elif height_lines is not None:
+            self.set_height_lines(height_lines, lock=True)
+
+    # ---- public API ----
+
+    def get(self) -> str:
+        return self.text.get("1.0", "end-1c")
+
+    def set_text(self, text: str):
+        self.text.delete("1.0", "end")
+        if text:
+            self.text.insert("1.0", text)
+        self._schedule_line_numbers()
+        self._schedule_highlight()
+
+    def focus(self):
+        self.text.focus_set()        
+
+    def set_enabled(self, enabled: bool, *, hide_preview_on_disable: bool = False):
+        enabled = bool(enabled)
+        self._enabled = enabled
+
+        # Ensure tag exists (used to hide preview without destroying content).
+        try:
+            if "HIDE_PREVIEW" not in self.text.tag_names():
+                self.text.tag_configure("HIDE_PREVIEW", elide=1)
+        except Exception:
+            pass
+
+        # Temporarily unlock to adjust tags even if currently disabled.
+        prev_state = None
+        try:
+            prev_state = str(self.text.cget("state"))
+            if prev_state == "disabled":
+                self.text.configure(state="normal")
+        except Exception:
+            prev_state = None
+
+        try:
+            if hide_preview_on_disable and (not enabled):
+                self.text.tag_add("HIDE_PREVIEW", "1.0", "end")
+            else:
+                self.text.tag_remove("HIDE_PREVIEW", "1.0", "end")
+        except Exception:
+            pass
+
+        fg_on = self._fg
+        fg_off = COLOR.get("text_disabled", self._meta)
+
+        # Visuals
+        try:
+            self.text.configure(
+                fg=(fg_on if enabled else fg_off),
+                insertbackground=(fg_on if enabled else fg_off),
+                cursor=("xterm" if enabled else "arrow"),
+                takefocus=(1 if enabled else 0),
+            )
+        except Exception:
+            pass
+
+        # Editability
+        try:
+            self.text.configure(state=("normal" if enabled else "disabled"))
+        except Exception:
+            # fallback: restore previous state if we changed it
+            try:
+                if prev_state is not None:
+                    self.text.configure(state=prev_state)
+            except Exception:
+                pass
+
+        # If we just disabled while focused, drop focus so the border doesn't look "active".
+        if not enabled:
+            try:
+                if self.focus_get() == self.text:
+                    self.focus_set()
+            except Exception:
+                pass
+            if self._highlight_line:
+                try:
+                    self.text.tag_remove("current_line", "1.0", "end")
+                except Exception:
+                    pass
+
+        # Redraw border immediately (fixes the "border appears only after click" issue).
+        try:
+            col = self._focus_col if (enabled and self.focus_get() == self.text) else self._border_col
+            self._redraw_border(col)
+        except Exception:
+            try:
+                self.canvas.event_generate("<Configure>")
+            except Exception:
+                pass
+
+    def set_height_lines(self, lines: int, *, lock: bool = True):
+        """Set editor height by number of text lines."""
+        try:
+            lines = max(1, int(lines))
+        except Exception:
+            lines = 6
+
+        self.text.configure(height=lines)
+
+        # Convert to px and apply as a fixed visual height (optional)
+        try:
+            f = tkfont.Font(font=self.text["font"])
+            line_px = int(f.metrics("linespace"))
+        except Exception:
+            line_px = 16  # fallback
+
+        # Add padding/border budget
+        pad = int(self._border_w + self._inner_pad)
+        extra = pad * 2 + 2  # a tiny safety margin
+        px = lines * line_px + extra
+
+        self.set_height_px(px, lock=lock)
+
+    def set_height_px(self, px: int, *, lock: bool = True):
+        """Set editor height in pixels. If lock=True, keep canvas visually fixed."""
+        try:
+            px = max(40, int(px))
+        except Exception:
+            px = 160
+
+        self._fixed_height_px = px
+        if lock:
+            self._lock_height = True
+            try:
+                self.canvas.configure(height=px)
+                # Make sure canvas doesn't expand vertically
+                self.canvas.pack_configure(fill="x", expand=False)
+            except Exception:
+                pass
+        else:
+            self._lock_height = False
+            try:
+                self.canvas.pack_configure(fill="both", expand=True)
+            except Exception:
+                pass
+
+        # Ask geometry managers not to override requested size
+        try: self.pack_propagate(False)
+        except Exception: pass
+        try: self.grid_propagate(False)
+        except Exception: pass
+
+        try:
+            self.configure(height=px)
+        except Exception:
+            pass
+
+        # Redraw border after size changes
+        try:
+            self.after_idle(lambda: self._redraw_border(self._border_col))
+        except Exception:
+            pass
+
+
+
+
+
+
+    # ---- text change event proxy ----
+
+    # Make Text emit <<Change>> on content or viewport updates.
+    def _install_text_proxy(self):
+        try:
+            # Guard against double-install.
+            if getattr(self, "_text_proxy_installed", False):
+                return
+            self._text_proxy_installed = True
+            self._text_orig_cmd = self.text._w + "_orig"
+
+            # Rename the original widget command and create a proxy.
+            self.text.tk.call("rename", self.text._w, self._text_orig_cmd)
+            self.text.tk.createcommand(self.text._w, self._text_proxy)
+
+            # Cleanup when widget dies (prevents Tcl errors on app shutdown).
+            def _cleanup(_e=None):
+                try:
+                    if self.text.winfo_exists():
+                        return
+                except Exception:
+                    pass
+                try:
+                    self.text.tk.deletecommand(self.text._w)
+                except Exception:
+                    pass
+            self.text.bind("<Destroy>", _cleanup, add="+")
+        except Exception:
+            pass
+    #  Tcl-level proxy for the Text widget command.
+    def _text_proxy(self, *args):
+        try:
+            result = self.text.tk.call((self._text_orig_cmd,) + args)
+        except tk.TclError as e:
+            err_msg = str(e).lower()
+            
+            # Ctrl+Z, Ctrl+Y fix
+            if "nothing to undo" in err_msg or "nothing to redo" in err_msg:
+                return ""
+            
+            # Ctrl+C, Ctrl+X fix
+            if 'tagged with "sel"' in err_msg or "tagged with 'sel'" in err_msg:
+                return ""
+            
+            raise
+        except Exception:
+            raise
+        
+        # Fire a unified "changed" event for the operations we care about.
+        try:
+            if not args:
+                return result
+            op = args[0]
+            changed = op in ("insert", "delete", "replace")
+            # viewport changes: xview/yview moveto/scroll
+            if not changed and op in ("xview", "yview"):
+                if len(args) >= 2 and args[1] in ("moveto", "scroll"):
+                    changed = True
+            # cursor move (insert mark)
+            if not changed and op == "mark" and len(args) >= 3:
+                if args[1] == "set" and args[2] == "insert":
+                    changed = True
+            if changed:
+                self.text.event_generate("<<Change>>", when="tail")
+        except Exception:
+            pass
+        return result
+
+    # ---- horizontal scrolling (Shift + wheel) ----
+    def _on_shift_wheel_xscroll(self, e):
+        try:
+            if getattr(e, "delta", 0):
+                step = -1 if e.delta > 0 else 1
+            else:
+                step = -1 if getattr(e, "num", 0) == 4 else 1
+            self.text.xview_scroll(step, "units")
+        except Exception:
+            pass
+        return "break"
+
+
+
+
+
+    # ---- keybinds ----
+    
+    def _on_ctrl_backspace(self, event):
+        if self.text.tag_ranges("sel"):
+            self.text.delete("sel.first", "sel.last")
+            return "break"
+
+        insert_pos = self.text.index("insert")
+        line_start = self.text.index("insert linestart")
+        text_before = self.text.get(line_start, insert_pos)
+
+        if text_before.endswith("    "):
+            start_del = self.text.index("insert - 4c")
+            self.text.delete(start_del, "insert")
+            return "break"
+        self.text.event_generate("<<Control-Backspace-Default>>") 
+        
+        self.text.delete("insert -1c wordstart", "insert")
+        return "break"
+
+    def _sel_extend_to(self, target_index: str) -> None:
+        """Extend selection from the anchor mark to target_index and move insert."""
+        try:
+            if not self.text.tag_ranges("sel"):
+                self.text.mark_set("anchor", "insert")
+        except Exception:
+            pass
+
+        try:
+            self.text.mark_set("insert", target_index)
+        except Exception:
+            return
+
+        try:
+            a = self.text.index("anchor")
+            b = self.text.index("insert")
+            self.text.tag_remove("sel", "1.0", "end")
+            if self.text.compare(a, "<=", b):
+                self.text.tag_add("sel", a, b)
+            else:
+                self.text.tag_add("sel", b, a)
+            self.text.tag_raise("sel")
+        except Exception:
+            pass
+
+    def _move_word_right_next_line(self) -> str:
+        line_end = self.text.index("insert lineend")
+        next_line_start = self.text.index(f"{line_end}+1c")
+        if self.text.compare(next_line_start, ">=", "end-1c"):
+            return line_end
+        return self._move_word_right_in_line_from(next_line_start)
+
+    def _move_word_left_in_line_from(self, index: str) -> str:
+        line_start = self.text.index(f"{index} linestart")
+        if self.text.compare(index, "<=", line_start):
+            return line_start
+
+        prefix = self.text.get(line_start, index)
+        i = len(prefix)
+        while i > 0 and prefix[i - 1].isspace():
+            i -= 1
+        while i > 0 and (not prefix[i - 1].isspace()):
+            i -= 1
+        return self.text.index(f"{line_start}+{i}c")
+
+
+    def _move_word_right_in_line_from(self, index: str) -> str:
+        line_end = self.text.index(f"{index} lineend")
+        if self.text.compare(index, ">=", line_end):
+            return line_end
+
+        suffix = self.text.get(index, line_end)
+        i = 0
+        while i < len(suffix) and suffix[i].isspace():
+            i += 1
+        while i < len(suffix) and (not suffix[i].isspace()):
+            i += 1
+        return self.text.index(f"{index}+{i}c")
+
+
+
+    def _move_word_left_prev_line(self) -> str:
+        line_start = self.text.index("insert linestart")
+        if self.text.compare(line_start, "<=", "1.0"):
+            return line_start
+
+        prev_pos = self.text.index(f"{line_start}-1c")
+        prev_line_end = self.text.index(f"{prev_pos} lineend")
+        return self._move_word_left_in_line_from(prev_line_end)
+
+
+    def _on_ctrl_shift_right(self, _event=None):
+        insert = self.text.index("insert")
+        line_end = self.text.index("insert lineend")
+
+        # Step 1: dojdź do końca linii
+        if self.text.compare(insert, "<", line_end):
+            target = self._move_word_right_in_line_from(insert)
+        else:
+            # Step 2: (już na końcu) skocz do następnej linii
+            target = self._move_word_right_next_line()
+
+        self._sel_extend_to(target)
+        return "break"
+
+    def _on_ctrl_shift_left(self, _event=None):
+        insert = self.text.index("insert")
+        line_start = self.text.index("insert linestart")
+
+        # Step 1: dojdź do początku linii
+        if self.text.compare(insert, ">", line_start):
+            target = self._move_word_left_in_line_from(insert)
+        else:
+            # Step 2: (już na początku) skocz do poprzedniej linii
+            target = self._move_word_left_prev_line()
+
+        self._sel_extend_to(target)
+        return "break"
+
+
+    # ---- scrolling glue ----
+
+    def _yview(self, *args):
+        self.text.yview(*args)
+        self._draw_line_numbers()
+
+    def _on_text_yscroll(self, first, last):
+        self.vbar.set(first, last)
+        self._draw_line_numbers()
+
+    def _after_scroll(self):
+        self._schedule_line_numbers()
+        if self._highlight_line:
+            self._update_current_line()
+
+    def _after_cursor_move(self):
+        if self._highlight_line:
+            self._update_current_line()
+
+    # ---- line numbers ----
+
+    def _schedule_line_numbers(self):
+        if self._ln_after is not None:
+            try: self.after_cancel(self._ln_after)
+            except Exception: pass
+        self._ln_after = self.after(10, self._draw_line_numbers)
+
+    def _draw_line_numbers(self):
+        self._ln_after = None
+        try:
+            self.gutter.delete("all")
+            self.gutter.configure(bg=self._lineno_bg)
+
+            # Determine visible lines
+            i = self.text.index("@0,0")
+            while True:
+                dline = self.text.dlineinfo(i)
+                if dline is None:
+                    break
+                y = dline[1]
+                lineno = i.split(".")[0]
+                self.gutter.create_text(
+                    self._lineno_pad_x, y,
+                    anchor="nw",
+                    text=lineno,
+                    fill=self._lineno_fg,
+                    font=(FONTS["mono"][0], max(9, int(FONTS["mono"][1]) - 1)),
+                )
+                i = self.text.index(f"{i}+1line")
+
+            # Gutter width adapts to total lines
+            total_lines = int(self.text.index("end-1c").split(".")[0])
+            digits = max(2, len(str(total_lines)))
+            try:
+                f = tkfont.Font(font=self.text["font"])
+                w = f.measure("9" * digits) + (self._lineno_pad_x * 2)
+            except Exception:
+                w = 48
+            self.gutter.configure(width=max(44, w))
+        except Exception:
+            pass
+
+    # ---- indent helpers ----
+
+    def _get_selection_or_line_range(self):
+        try:
+            start = self.text.index("sel.first")
+            end = self.text.index("sel.last")
+            # expand to full lines
+            start_line = start.split(".")[0]
+            end_line = end.split(".")[0]
+            return f"{start_line}.0", f"{end_line}.end"
+        except tk.TclError:
+            # no selection -> current line
+            line = self.text.index("insert").split(".")[0]
+            return f"{line}.0", f"{line}.end"
+
+    def _on_tab(self, event):
+        if self.text.tag_ranges("sel"):
+            start = self.text.index("sel.first linestart")
+            end   = self.text.index("sel.last lineend")
+            lines = self.text.get(start, end).splitlines()
+            
+            if event.state & 0x0001:  # Shift → outdent
+                new_lines = []
+                for line in lines:
+                    if line.startswith("    "):
+                        new_lines.append(line[4:])
+                    else:
+                        new_lines.append(line)
+            else:
+                new_lines = ["    " + line for line in lines]
+                
+            self.text.replace(start, end, "\n".join(new_lines))
+            self.text.tag_add("sel", start, f"{start}+{len(new_lines)}l")
+            return "break"        
+        self.text.insert("insert", "    ")
+        return "break"
+
+    # auto-indent based on current line leading whitespace
+    def _on_return(self, event):
+        cur = self.text.index("insert")
+        line = self.text.get(f"{cur} linestart", f"{cur} lineend")
+        
+        # policz aktualne wcięcie
+        indent = len(line) - len(line.lstrip())
+        indent_str = " " * indent
+        
+        # jeśli poprzednia linia kończy się dwukropkiem → +4
+        prev_line = self.text.get(f"{cur}-1l linestart", f"{cur}-1l lineend")
+        if prev_line.rstrip().endswith(":"):
+            indent_str += "    "
+        
+        # cofanie wcięcia po niektórych słowach
+        if line.strip() in ("pass", "return", "break", "continue", "raise"):
+            indent_str = indent_str[:-4] if len(indent_str) >= 4 else ""
+        
+        self.text.insert("insert", "\n" + indent_str)
+        return "break"
+
+    # ---- current line highlight ----
+
+    def _update_current_line(self):
+        try:
+            self.text.tag_remove("current_line", "1.0", "end")
+            line = self.text.index("insert").split(".")[0]
+            self.text.tag_add("current_line", f"{line}.0", f"{line}.end+1c")
+        except Exception:
+            pass
+
+    # ---- highlighting ----
+
+    def _init_tags(self):
+        # Current line
+        try:
+            self.text.tag_configure("current_line", background=_darken_hex(self._bg, 0.10))
+            self.text.tag_lower("current_line")
+        except Exception:
+            pass
+
+        # Syntax
+        kw = COLOR.get("accent_yellow", "#ffd166")
+        st = COLOR.get("accent_green",  "#39d353")
+        cm = COLOR.get("meta",          "#9fb7d9")
+        nu = COLOR.get("accent_lightblue", "#9cd2ff")
+        op = COLOR.get("accent_blue",   "#72c0ff")
+        fn = COLOR.get("accent_lightblue", "#9cd2ff")
+        ob = COLOR.get("accent_darkblue",  "#2b84d6")
+        cn = COLOR.get("accent_yellow",    "#ffd166")
+        fl = COLOR.get("accent_yellow", "#ffd166")  # albo inny kolor
+
+        self.text.tag_configure("tok_kw",  foreground=kw)
+        self.text.tag_configure("tok_str", foreground=st)
+        self.text.tag_configure("tok_com", foreground=cm)
+        self.text.tag_configure("tok_num", foreground=nu)
+        self.text.tag_configure("tok_op",  foreground=op)
+        self.text.tag_configure("tok_fn",    foreground=fn)
+        self.text.tag_configure("tok_obj",   foreground=ob)
+        self.text.tag_configure("tok_const", foreground=cn)
+        self.text.tag_configure("tok_dom",   underline=1)  # np. “ważne” symbole        
+        self.text.tag_configure("tok_file", foreground=fl, underline=1)
+        
+        self.text.tag_raise("tok_file", "tok_str")
+
+    def _on_key_release(self, e=None):
+        self._schedule_line_numbers()
+        if self._highlight_line:
+            self._update_current_line()
+        self._schedule_highlight()
+
+    def _schedule_highlight(self):
+        if self._hl_after is not None:
+            try: self.after_cancel(self._hl_after)
+            except Exception: pass
+        self._hl_after = self.after(60, self._do_highlight)
+
+    def _clear_syntax_tags(self):
+        for tag in ("tok_kw","tok_str","tok_com","tok_num","tok_op","tok_fn","tok_obj","tok_const","tok_dom", "tok_file"):
+            try:
+                self.text.tag_remove(tag, "1.0", "end")
+            except Exception:
+                pass
+
+    def _do_highlight(self):
+        self._hl_after = None
+        try:
+            src = self.get()
+        except Exception:
+            return
+
+        self._clear_syntax_tags()
+        if not src:
+            return
+
+        self._highlight_language(src)
+        
+    def _apply_spans(self, spans, tag):
+        # spans: list[(start_index_in_text, end_index_in_text)]
+        for a, b in spans:
+            try:
+                self.text.tag_add(tag, f"1.0+{a}c", f"1.0+{b}c")
+            except Exception:
+                pass
+
+    def _highlight_language(self, s: str):
+        # cache compiled regexes
+        if not hasattr(self, "_stormc_re"):
+            # patterns inspired by your .tmlanguage
+            self._stormc_re = {
+                "str": re.compile(r"\"(?:\\.|[^\\\"])*\""),
+                "linecom": re.compile(r"//[^\n]*"),
+                "blockcom": re.compile(r"/\*[\s\S]*?\*/"),
+                "kw": re.compile(r"\b(if|else|while|for|return|switch|case|break|extern|native)\b"),
+                "types": re.compile(r"\b(void|bool|int|float|string|object|ref|aref)\b"),
+                "dir": re.compile(r"(?m)^\s*#\s*(include|define|event_handler|script_libriary)\b.*$"),
+                "num": re.compile(r"-?\b\d+(\.\d+)?\b"),
+                "op": re.compile(r"[{}\[\]();,\.\+\-\*/%<>=!&|^~?:]"),
+                # internal functions – you can paste the full list here (shortened sample below)
+                "ifn": re.compile(
+                    r"(?i)\b("
+                    r"Rand|frnd|CreateClass|CreateEntity|DeleteClass|SetEventHandler|ExitProgram|GetEventData|Stop|SendMessage|"
+                    r"LoadSegment|UnloadSegment|Trace|MakeInt|MakeFloat|abs|sqrt|sin|cos|tan|atan|"
+                    r"DeleteAttribute|CheckAttribute|sti|stf|argb|makeref|makearef"
+                    r")\b"
+                ),
+            }
+
+        R = self._stormc_re
+
+        def overlaps(a, b, spans):
+            for x, y in spans:
+                if not (b <= x or a >= y):
+                    return True
+            return False
+
+        # 1) strings
+        str_spans = [(m.start(), m.end()) for m in R["str"].finditer(s)]
+        self._apply_spans(str_spans, "tok_str")
+
+        # 2) comments (skip those inside strings)
+        com_raw = [(m.start(), m.end()) for m in R["blockcom"].finditer(s)] + [(m.start(), m.end()) for m in R["linecom"].finditer(s)]
+        com_spans = [(a, b) for (a, b) in com_raw if not overlaps(a, b, str_spans)]
+        self._apply_spans(com_spans, "tok_com")
+
+        # helper: skip strings/comments
+        def ok(a, b):
+            return (not overlaps(a, b, str_spans)) and (not overlaps(a, b, com_spans))
+
+        # 3) directives
+        dir_spans = []
+        for m in R["dir"].finditer(s):
+            a, b = m.start(), m.end()
+            if ok(a, b):
+                dir_spans.append((a, b))
+        self._apply_spans(dir_spans, "tok_kw")
+
+        # 4) numbers
+        num_spans = []
+        for m in R["num"].finditer(s):
+            a, b = m.start(), m.end()
+            if ok(a, b):
+                num_spans.append((a, b))
+        self._apply_spans(num_spans, "tok_num")
+
+        # 5) keywords + types
+        kw_spans, ty_spans = [], []
+        for m in R["kw"].finditer(s):
+            a, b = m.start(), m.end()
+            if ok(a, b):
+                kw_spans.append((a, b))
+        for m in R["types"].finditer(s):
+            a, b = m.start(), m.end()
+            if ok(a, b):
+                ty_spans.append((a, b))
+        self._apply_spans(kw_spans, "tok_kw")
+        self._apply_spans(ty_spans, "tok_const")  # użyjemy tok_const jako "typy" (albo dodaj osobny tag)
+
+        # 6) internal functions
+        fn_spans = []
+        for m in R["ifn"].finditer(s):
+            a, b = m.start(), m.end()
+            if ok(a, b):
+                fn_spans.append((a, b))
+        self._apply_spans(fn_spans, "tok_fn")
+
+        # 7) operators
+        op_spans = []
+        for m in R["op"].finditer(s):
+            a, b = m.start(), m.end()
+            if ok(a, b):
+                op_spans.append((a, b))
+        self._apply_spans(op_spans, "tok_op")
+        
+        # 8) files
+        file_re = re.compile(
+            r"(?i)\b[A-Za-z0-9_\-./\\]+\.(txt|c|h|ini|json|png|jpg|jpeg|tga|wav|ogg|mp3)\b"
+        )
+        file_spans = []
+        for m in file_re.finditer(s):
+            a, b = m.start(), m.end()
+            if not overlaps(a, b, com_spans):
+                file_spans.append((a, b))
+
+        self._apply_spans(file_spans, "tok_file")
+
+
 
 
 # Multiline Text with placeholder support

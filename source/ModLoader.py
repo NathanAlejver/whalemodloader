@@ -26,7 +26,7 @@ settings_dir = APP_DIR / "settings"
 
 NAME = "Whale Mod Loader"
 AUTHOR = 'NathanAlejver'
-VERSION = 'BETA 0.2'
+VERSION = 'BETA 0.3'
 
 WORKSHOP_GAME_ID = '2230980'
 STEAM_URL = "steam://rungameid/" + WORKSHOP_GAME_ID
@@ -41,6 +41,7 @@ FOLDER_NAME = "WhaleModLoader"
 
 FACTORY_RESET = False # switched automatically by gui
 PURGE_BACKUPS_ONLY = False # switched automatically by gui
+DEF_COMBO_NAME = "Default"
 
 BACKUP_DIR = APP_DIR / "assets" / "backups" / "original_game_files"
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
@@ -67,6 +68,15 @@ def log_banner_error(title: str, lines: list[str]) -> None:
     for ln in lines:
         log(f"[ERROR] {ln}")
     log("[ERROR] " + "=" * 64)
+
+# Tries common encodings used by this game/mod files.
+def read_text_best_effort(p: Path) -> tuple[str, str]:
+    for enc in ("utf-8", "cp1251", "cp1250", "latin-1"):
+        try:
+            return p.read_text(encoding=enc), enc
+        except UnicodeDecodeError:
+            pass
+    return p.read_bytes().decode("utf-8", errors="replace"), "utf-8"
 
 
 
@@ -382,6 +392,9 @@ class Mod:
         self.files_dir = self.repl_root / "files"
         # python definitions file (optional)
         self.replacements_py = self.base / "replacements.py"
+        self.variant_id = ""
+        self.variant_base = self.base
+        self._apply_variant_layout()
 
     def __repr__(self) -> str:
         return f"Mod(name={self.name!r}, priority={self.priority}, enabled={self.enabled})"
@@ -390,6 +403,49 @@ class Mod:
     def name(self) -> str:
         # Prefer manifest name, fall back to folder name
         return str(self.meta.get("name") or self.dir_name)
+    
+    # mod varians apply
+    def _apply_variant_layout(self) -> None:
+        active = str(self.meta.get("active_variant") or "").strip()
+        active_l = active.lower()
+
+        use_latest = False
+        if active == "":
+            use_latest = True
+        if active_l == DEF_COMBO_NAME:
+            use_latest = True
+
+        self.variant_id = active
+        self.variant_base = self.base
+
+        if not use_latest:
+            candidate = self.base / "variants" / active
+            if candidate.exists() and candidate.is_dir():
+                self.variant_base = candidate
+            else:
+                self.variant_id = ""
+                self.variant_base = self.base
+                log("[WARN] Variant '" + active + "' not found, fallback to latest: " + self.base.as_posix())
+
+        # Prefer "<variant>/replacements", else allow "<variant>/" directly
+        repl_dir = self.variant_base / "replacements"
+        if repl_dir.exists() and repl_dir.is_dir():
+            self.repl_root = repl_dir
+        else:
+            self.repl_root = self.variant_base
+
+        self.lines_dir = self.repl_root / "lines"
+        self.functions_dir = self.repl_root / "functions"
+        self.files_dir = self.repl_root / "files"
+
+        # Prefer variant replacements.py, fallback to latest
+        vpy = self.variant_base / "replacements.py"
+        if vpy.exists() and vpy.is_file():
+            self.replacements_py = vpy
+        else:
+            self.replacements_py = self.base / "replacements.py"
+
+
 
 # Find mods that contain a manifest.json with basic metadata.
 def discover_mods(mods_root: Path) -> List["Mod"]:
@@ -413,6 +469,7 @@ def discover_mods(mods_root: Path) -> List["Mod"]:
         priority = int(manifest.get("priority", 100))
         mod = Mod(base=child, name=child.name, priority=priority, enabled=enabled)
         mod.meta = manifest
+        mod._apply_variant_layout()
         if not mod.enabled:
             log(f"[INFO] Mod disabled, skipping: {mod.name}")
             continue
@@ -573,15 +630,25 @@ def make_ws_agnostic_pattern(text: str) -> re.Pattern:
         def _op_repl(m: re.Match) -> str:
             op = m.group(1)
             return r'\s*' + re.escape(op) + r'\s*'
-        escaped2 = re.sub(r'\\([=+\-*/<>]{1,2})', _op_repl, escaped)
+        escaped2 = re.sub(r'(==|!=|<=|>=|=|<|>|\\[+\-*/])',
+                  lambda m: r'\s*' + re.escape(m.group(0).lstrip('\\')) + r'\s*',
+                  escaped)
         pattern_parts.append(escaped2)
-    pattern = r'\s+'.join(pattern_parts)
+    pattern = r'\s*'.join(pattern_parts)
 
     try:
         return re.compile(pattern, re.DOTALL)
     except re.error:
-        fallback = re.escape(s).replace(r'\ ', r'\s+') # simpler fallback
+        fallback = re.escape(s).replace(r'\ ', r'\s*') # simpler fallback
         return re.compile(fallback, re.DOTALL)
+
+
+# Keep string replacements that intentionally use backreferences. A fix for SHITTY FUCKIGG AS:KJRELSDFLKDSJ that console sees '\s' in any string and thinks its some backslash, wtf 
+def _safe_re_sub_repl(replacement: str):
+    if re.search(r'\\(?:\d+|g<[^>]+>)', replacement or ''):
+        return replacement
+    return lambda _m, _r=replacement: _r
+
 
 # Detect function definition header even if '{' is on the same line.
 def is_function_header(line: str, func_name: str) -> bool:
@@ -921,6 +988,9 @@ def main() -> None:
             # Load all shit
             funcs_lines = merged.line_replacements.get(rel, {})
             funcs_full  = merged.function_replacements.get(rel, {})
+            if rel == "Program/colonies/Colonies_init.c":
+                log(f"\t     [DEBUG] funcs_lines keys: {list(funcs_lines.keys())}")
+                log(f"\t     [DEBUG] funcs_full keys: {list(funcs_full.keys())}")
             file_line_repls = merged.file_line_replacements.get(rel, [])
             file_adds   = merged.file_additions.get(rel, [])
             spec_file   = merged.file_replacements.get(rel)  
@@ -956,13 +1026,11 @@ def main() -> None:
             # Source: always a backup of the original if we have it, otherwise a live file
             source_path = backup_path if backup_path.exists() else full_path
             try:
-                source_text = source_path.read_text(encoding='utf-8')
-            except UnicodeDecodeError:
-                log(f"\t|     [ERROR] Encoding issue reading source (expected UTF-8)...")
-                continue
+                source_text, source_enc = read_text_best_effort(source_path)
             except FileNotFoundError:
                 log(f"\t|     [WARN] Source file not found, skipping...")
                 continue
+
 
 
             pending_events: List[str] = []
@@ -1034,7 +1102,8 @@ def main() -> None:
                         brace_level = stripped.count('{') - stripped.count('}')
                         wait_for_brace = False
                 else:
-                    brace_level += stripped.count('{') - stripped.count('}')
+                    code_part = stripped.split("//", 1)[0]   # utnie komentarz liniowy
+                    brace_level += code_part.count("{") - code_part.count("}")
 
                 if brace_level <= 0 and not wait_for_brace:
                     func_text = ''.join(buffer_lines)
@@ -1054,7 +1123,7 @@ def main() -> None:
                             pat = make_ws_agnostic_pattern(old_text)
                             replacement = load_line_replacement(new_spec) if isinstance(new_spec, str) else str(new_spec)
                             
-                            func_text, n = pat.subn(replacement, func_text, count=1)
+                            func_text, n = pat.subn(_safe_re_sub_repl(replacement), func_text, count=1)
                             if n > 0:
                                 file_stats[f"{label}/{rel}"][in_function] += n
                                 new_spec_log = ' '.join(str(new_spec).split())
@@ -1088,7 +1157,7 @@ def main() -> None:
                     replacement = load_line_replacement(new_spec) if isinstance(new_spec, str) else str(new_spec)
                     matches = list(pat.finditer(new_content))
                     if matches:
-                        new_content = pat.sub(replacement, new_content)
+                        new_content = pat.sub(_safe_re_sub_repl(replacement), new_content)
                         pending_events.append(f"\t > [REPLACE FILE-LINE] {rel} -> `{str(new_spec)[:60]}`")
                         file_stats[f"{label}/{rel}"]['<file>'] += len(matches)
 
@@ -1128,10 +1197,9 @@ def main() -> None:
 
             # Read current target file content (may be missing)
             try:
-                current_content = full_path.read_text(encoding='utf-8') if full_path.exists() else ''
-            except UnicodeDecodeError:
-                log(f"\t [ERROR] Encoding issue reading target game file (expected UTF-8): {full_path}")
-                continue
+                current_content = read_text_best_effort(full_path)[0] if full_path.exists() else ''
+            except FileNotFoundError:
+                current_content = ''
 
             # If nothing changed compared to current live file, skip write
             if new_content == current_content:
@@ -1144,7 +1212,7 @@ def main() -> None:
             # Write new file
             try:
                 full_path.parent.mkdir(parents=True, exist_ok=True)
-                full_path.write_text(new_content, encoding='utf-8')
+                full_path.write_text(new_content, encoding=source_enc)
                 log(f"\t     [UPDATE FILE]")
                 for ev in pending_events:
                     log("\t\t" + ev)

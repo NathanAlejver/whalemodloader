@@ -127,24 +127,10 @@ def _normalize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _py_str(s: str, indent: int) -> str:
-    # multiline -> triple quotes (no indenting inner content)
+    # multiline -> triple quotes (preserve exact content)
     if "\n" in s:
         body = s.replace("\r\n", "\n").replace("\r", "\n")
-
-        # Remove blank/whitespace-only lines at start and end (prevents "falling down")
-        lines = body.splitlines()
-        while lines and lines[0].strip() == "":
-            lines.pop(0)
-        while lines and lines[-1].strip() == "":
-            lines.pop()
-
-        body = "\n".join(lines)
-
-        close_pad = " " * max(indent - 4, 0)
-        if body == "":
-            return "'''\n" + close_pad + "'''"
-
-        return "'''\n" + body + "\n" + close_pad + "'''"
+        return "'''" + body + "'''"
 
     return repr(s)
 

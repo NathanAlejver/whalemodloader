@@ -4,7 +4,7 @@
 from __future__ import annotations
 import re, sys, json, types, shutil, importlib.util, os, webbrowser, json
 from gui_common import style_scrollbar, COLOR_PALETTE as COLOR, ICON_SIZE, FONTS
-from gui_common import Tooltip, Button, Scrollable, Icon, HSeparator, Window, Titlebar, FileManagement, InputText, InputTextStatic ,InputMultiline
+from gui_common import Tooltip, Button, Scrollable, Icon, HSeparator, Window, Titlebar, FileManagement, InputText, InputTextStatic, InputMultiline, CustomCombo
 from PIL import Image, ImageTk, ImageOps, ImageEnhance
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
@@ -54,6 +54,7 @@ MODS_UI_STATE_FILE = "mods_ui_state.json"
 HERE = ModLoader.APP_DIR / "assets" / "settings"
 SETTINGS_PATH = HERE / ".gui_modloader_settings.json"
 MODS_PATH = ModLoader.APP_DIR / "mods"
+DEF_COMBO_NAME = ModLoader.DEF_COMBO_NAME
 
 RowRefs = Tuple[
     tk.Widget, tk.Widget, tk.Widget | None, tk.Widget | None, tk.Widget | None,
@@ -200,7 +201,7 @@ class ModsPanel(ttk.Frame):
         self.refresh()
         
         self._start_autorefresh()
-        self.bind("<Destroy>", lambda e: self._stop_autorefresh(), add="+")
+        self.bind("<Destroy>", lambda e: self._stop_autorefresh(), add="+")       
         
         # binds
         def _on_ctrl_n(_=None):
@@ -369,14 +370,20 @@ class ModsPanel(ttk.Frame):
                 max_right = max(max_right, right_w.winfo_width() + 30)
             except Exception:
                 pass
-        wrap = max(200, avail - LEFT_PAD - max_right)
+        wrap_main  = max(200, avail - LEFT_PAD - max_right) 
+        wrap_meta  = max(200, avail - LEFT_PAD - 24)
         for key, refs in self._row_refs.items():
             _, _, intro_w, changes_w, meta_w, *_ = refs
-            for w in (intro_w, changes_w, meta_w):
+            for w in (intro_w, changes_w):
                 if not w:
                     continue
                 try:
-                    w.configure(wraplength=wrap, justify="left")
+                    w.configure(wraplength=wrap_main, justify="left")
+                except Exception:
+                    pass
+            if meta_w:
+                try:
+                    meta_w.configure(wraplength=wrap_meta, justify="left")
                 except Exception:
                     pass
 
@@ -623,9 +630,32 @@ class ModsPanel(ttk.Frame):
                         if ln.strip()
                     ]
 
+                # Get all data
                 author = str(data.get("author", ""))
                 game_ver = str(data.get("game_version", data.get("version_game", "")))
-                mod_ver = str(data.get("mod_version", data.get("version_mod", "")))
+                mod_ver = str(data.get("mod_version", data.get("version_mod", "")))          
+                
+                # Variants
+                variants = data.get("variants", None)
+                if not isinstance(variants, list):
+                    variants = []          
+                variants_dir = child / "variants"
+                if (not variants) and variants_dir.exists() and variants_dir.is_dir():
+                    auto = []
+                    try:
+                        for vd in sorted(variants_dir.iterdir()):
+                            if not vd.is_dir():
+                                continue
+                            vid = vd.name.strip()
+                            if not vid:
+                                continue
+                            # label derived from folder name (cheap, readable)
+                            lbl = vid.replace("_", " ").replace("-", " ")
+                            auto.append({"id": vid, "label": lbl})
+                    except Exception:
+                        pass
+                    variants = auto
+                active_variant = str(data.get("active_variant", "")).strip()
 
                 mods.append({
                     "dir": child,
@@ -640,6 +670,8 @@ class ModsPanel(ttk.Frame):
                     "mod_version": mod_ver,
                     "origin": origin_label,
                     "raw": data,
+                    "variants": variants,
+                    "active_variant": active_variant,
                 })
         return mods
 
@@ -1177,12 +1209,12 @@ class ModsPanel(ttk.Frame):
                         card, text=" • ".join(meta_parts),
                         style="Mods.Meta.TLabel", justify="left", wraplength=1
                     )
-                    meta_lbl.grid(row=spacer_row + 1, column=1, sticky="sw", pady=(6, 0))
+                    meta_lbl.grid(row=spacer_row + 1, column=1, columnspan=2, sticky="sw", pady=(6, 0))
 
 
             # --- right column area ---
             right = tk.Frame(card, bg=CARD_BG, bd=0, highlightthickness=0)
-            right.grid(row=0, column=2, rowspan=10, sticky="ne", padx=(20, 0))
+            right.grid(row=0, column=2, sticky="ne", padx=(20, 0))
             Icon.bg_changed(right)
             
             # Toggle button
@@ -1201,6 +1233,59 @@ class ModsPanel(ttk.Frame):
                 self._save_manifest(mm)
                 self._apply_enabled_by_key(rk, new_val)
 
+            # --- variant selector
+            variants = m.get("variants") or []
+            if isinstance(variants, list) and len(variants) > 0:
+                items = [(DEF_COMBO_NAME, DEF_COMBO_NAME)]
+                for v in variants:
+                    if not isinstance(v, dict):
+                        continue
+                    vid = str(v.get("id") or "").strip()
+                    if not vid:
+                        continue
+                    lbl = str(v.get("label") or vid).strip()
+                    items.append((lbl, vid))
+
+                if len(items) > 0:
+                    # Determine current selection
+                    current_vid = str(m.get("active_variant") or "").strip()
+                    if current_vid == "":
+                        current_vid = DEF_COMBO_NAME
+                    current_lbl = items[0][0]
+                    for lbl, vid in items:
+                        if vid == current_vid:
+                            current_lbl = lbl
+                            break
+
+                    var_box = CustomCombo(right, values=[x[0] for x in items], width=6, state="readonly")
+                    var_box.set(current_lbl)
+                    var_box.pack(side="left", padx=(0, 10))
+
+                    def _on_variant_change(_e=None, mm=m, box=var_box, opts=items):
+                        sel_lbl = str(box.get() or "")
+                        sel_vid = ""
+                        for l, v in opts:
+                            if l == sel_lbl:
+                                sel_vid = v
+                                break
+                        if not sel_vid:
+                            return
+                        mm["active_variant"] = sel_vid
+                        raw = mm.get("raw") or {}
+                        if sel_vid == DEF_COMBO_NAME:
+                            if "active_variant" in raw:
+                                del raw["active_variant"]
+                            mm["active_variant"] = ""
+                        else:
+                            raw["active_variant"] = sel_vid
+                            mm["active_variant"] = sel_vid
+
+                        mm["raw"] = raw
+                        self._save_manifest(mm)
+
+                    var_box.bind("<<ComboboxSelected>>", _on_variant_change, add="+")
+
+            # Mod switch
             btn_switch = Icon.Toggle(
                 right,
                 name="switch",

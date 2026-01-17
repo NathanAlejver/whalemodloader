@@ -12,9 +12,9 @@ def _ml_dbg(msg):
 from typing import Dict, List, Tuple, Any, Optional, Union
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import os, math, copy, itertools, traceback, textwrap, sys, subprocess
+import os, math, copy, itertools, traceback, textwrap, sys, subprocess, re
 from gui_common import COLOR_PALETTE as COLOR, ICON_SIZE, FONTS
-from gui_common import Tooltip, VSeparator, InputText, InputMultiline, Icon, Scrollable, Button, Window, Titlebar, FileManagement
+from gui_common import Tooltip, VSeparator, InputText, InputMultiline, CodeEditor, Icon, Scrollable, Button, Window, Titlebar, FileManagement
 from pathlib import Path
 import ModLoader
 
@@ -35,7 +35,7 @@ C_INPUT_BG     = COLOR["input_bg"]
 C_INPUT_BD     = COLOR["input_bd"]
 C_ACCENT_GREEN = COLOR["accent_green"]
 C_ACCENT_RED   = COLOR["accent_red"]
-C_ACCENT_BLUE   = COLOR["accent_blue"]
+C_ACCENT_BLUE  = COLOR["accent_blue"]
 
 BADGE_BG         = COLOR["badge_bg"]
 BADGE_FG         = COLOR["badge_fg"]
@@ -57,41 +57,29 @@ FONT_BASE_MINI   = FONTS["base_mini"]
 SHEET_PANEL            = COLOR["sheet_panel"]
 SHEET_PANEL_HOVER      = COLOR["sheet_panel_hover"]
 SHEET_PANEL_ACTIVE     = COLOR["sheet_panel_active"]
-SHEET_PANEL            = COLOR["sheet_panel"]
 
 TITLE_FONT  = ("Segoe UI", 12, "bold")
 
-
+CODE_EDITOR_LINES = 10
 
 
 
 # ====== Helpers ======
 
+
+#Return the underlying tk.Text for both tk.Text and CodeEditor
+def as_text(w):
+    return getattr(w, "text", w)
+
 # Enable/disable text field
-def set_texts_enabled(enabled: bool, *texts: "tk.Text", hide_preview_on_disable: bool = True):
-    for t in texts:
+def set_editors_enabled(enabled: bool, *widgets, hide_preview_on_disable: bool = True):
+    for w in widgets:
         try:
-            # ensure our hide tag exists
-            if "HIDE_PREVIEW" not in t.tag_names():
-                t.tag_configure("HIDE_PREVIEW", elide=1)
-
-            prev = str(t.cget("state"))
-            t.config(state="normal")  # temporarily unlock to change tags & styles
-
-            # show/hide preview
-            if hide_preview_on_disable and not enabled:
-                t.tag_add("HIDE_PREVIEW", "1.0", "end")
+            if hasattr(w, 'set_enabled') and callable(getattr(w, 'set_enabled')):
+                w.set_enabled(bool(enabled), hide_preview_on_disable=hide_preview_on_disable)
             else:
-                t.tag_remove("HIDE_PREVIEW", "1.0", "end")
-
-            # colors for active/inactive
-            t.config(
-                fg=C_TEXT if enabled else C_SUB,
-                insertbackground=C_TEXT if enabled else C_SUB
-            )
-
-            # lock back
-            t.config(state="normal" if enabled else "disabled")
+                t = as_text(w)
+                t.config(state='normal' if enabled else 'disabled')
         except Exception:
             pass
 
@@ -175,7 +163,7 @@ def guess_mod_functions_dir() -> Optional[str]:
 
 def mk_text(parent, h=6, wrap="word"):
     t = tk.Text(parent, height=h, wrap=wrap, bg=C_INPUT_BG, fg=C_TEXT,
-                insertbackground=C_TEXT, highlightthickness=1,
+                insertbackground=C_TEXT,
                 highlightbackground=C_INPUT_BD, relief="flat", bd=0, font=FONT_MONO,
                 undo=True, autoseparators=True, maxundo=128)
     def _safe_undo(_e=None):
@@ -195,6 +183,7 @@ def mk_text(parent, h=6, wrap="word"):
             try: t.edit_separator()
             except Exception: pass
     t.bind("<KeyRelease>", _maybe_sep, add="+")
+    _install_code_keys(t)
     return t
 
 def mk_entry(parent):
@@ -213,6 +202,84 @@ def add_tip(top: tk.Misc, text: str, pady=(6, 10), padx=0):
     top.bind("<Configure>", _wrap, add="+")
     _wrap()
     return lbl
+
+
+
+# ====== Code Editor ======
+
+def _leading_ws(s: str) -> str:
+    m = re.match(r"[ \t]*", s or "")
+    return m.group(0) if m else ""
+
+def _install_code_keys(t: tk.Text):
+    # TAB -> 4 spaces (albo prawdziwy tab, jak wolisz)
+    def on_tab(e=None):
+        try:
+            sel = t.tag_ranges("sel")
+            if sel:
+                # indent selection
+                start = t.index("sel.first linestart")
+                end = t.index("sel.last lineend")
+                line = start
+                while t.compare(line, "<=", end):
+                    t.insert(line, "    ")
+                    line = t.index(f"{line} +1line")
+                return "break"
+            else:
+                t.insert("insert", "    ")
+                return "break"
+        except Exception:
+            return "break"
+
+    def on_shift_tab(e=None):
+        try:
+            sel = t.tag_ranges("sel")
+            if sel:
+                start = t.index("sel.first linestart")
+                end = t.index("sel.last lineend")
+                line = start
+                while t.compare(line, "<=", end):
+                    txt = t.get(line, f"{line} +4c")
+                    if txt == "    ":
+                        t.delete(line, f"{line} +4c")
+                    else:
+                        txt2 = t.get(line, f"{line} +1c")
+                        if txt2 == "\t":
+                            t.delete(line, f"{line} +1c")
+                    line = t.index(f"{line} +1line")
+                return "break"
+            else:
+                # unindent current line
+                line = t.index("insert linestart")
+                txt = t.get(line, f"{line} +4c")
+                if txt == "    ":
+                    t.delete(line, f"{line} +4c")
+                else:
+                    txt2 = t.get(line, f"{line} +1c")
+                    if txt2 == "\t":
+                        t.delete(line, f"{line} +1c")
+                return "break"
+        except Exception:
+            return "break"
+
+    # ENTER -> copy indent from previous line; if line endswith "{", add extra indent
+    def on_return(e=None):
+        try:
+            cur_line_start = t.index("insert linestart")
+            prev_line_start = t.index(f"{cur_line_start} -1line")
+            prev = t.get(prev_line_start, f"{prev_line_start} lineend")
+            base = _leading_ws(prev)
+            extra = "    " if prev.rstrip().endswith("{") else ""
+            t.insert("insert", "\n" + base + extra)
+            return "break"
+        except Exception:
+            # fallback: normal return
+            return None
+
+    t.bind("<Tab>", on_tab, add="+")
+    t.bind("<Shift-Tab>", on_shift_tab, add="+")
+    t.bind("<Return>", on_return, add="+")
+
 
 # ====== Cards ======
 class FunctionCard(tk.Frame):
@@ -278,6 +345,40 @@ class FunctionCard(tk.Frame):
         _set_bg_recursive(self, C_PANEL_HOVER if on else C_PANEL)
         Icon.bg_changed(self)
 
+# Pretty preview for pairs
+def _pair_preview(text: str, *, max_lines: int = 5, tabsize: int = 4) -> str:
+    if text is None:
+        return ""
+    s = str(text)
+
+    # Normalize newlines + remove tabs
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    #s = s.expandtabs(tabsize)
+
+    # Remove common indentation + trim outer blank lines
+    s = textwrap.dedent(s).strip("\n")
+
+    if not s:
+        return ""
+
+    # Left-align each line, trim trailing spaces
+    lines = [ln.rstrip() for ln in s.split("\n")]
+    # lines = [ln.lstrip() for ln in lines]
+
+    # Remove empty leading/trailing lines after left-align
+    while lines and lines[0] == "":
+        lines.pop(0)
+    while lines and lines[-1] == "":
+        lines.pop()
+    if not lines:
+        return ""
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        # mark truncation without spamming extra line
+        lines[-1] = (lines[-1] + "  …").rstrip()
+    return "\n".join(lines)
+
+
 class PairCard(tk.Frame):
     def __init__(self, master, idx: int, top_text: str, bottom_text: str,
                  on_click, on_delete, on_select):
@@ -296,9 +397,9 @@ class PairCard(tk.Frame):
         self.grid_columnconfigure(1, weight=1); self.grid_columnconfigure(2, weight=0)
         
         # text
-        self.lbl_top = tk.Label(body, text=(top_text or "").strip(), bg=self["bg"], fg=C_ACCENT_RED,
+        self.lbl_top = tk.Label(body, text=_pair_preview(top_text), bg=self["bg"], fg=C_ACCENT_RED,
                                 font=FONT_MONO, anchor="w", justify="left", wraplength=10)
-        self.lbl_bot = tk.Label(body, text=(bottom_text or "").strip(), bg=self["bg"], fg=C_ACCENT_GREEN,
+        self.lbl_bot = tk.Label(body, text=_pair_preview(bottom_text), bg=self["bg"], fg=C_ACCENT_GREEN,
                                 font=FONT_MONO, anchor="w", justify="left", wraplength=10)
         self.lbl_top.pack(fill="x", expand=True); self.lbl_bot.pack(fill="x", expand=True, pady=(3,0))
         
@@ -323,6 +424,9 @@ class PairCard(tk.Frame):
         _set_bg_recursive(self, CARD_BG_ACTIVE if v else CARD_BG)
         try: self.configure(highlightbackground="#2b4d7a" if v else C_BORDER)
         except Exception: pass
+    def set_texts(self, top_text: str, bottom_text: str):
+        self.lbl_top.config(text=_pair_preview(top_text))
+        self.lbl_bot.config(text=_pair_preview(bottom_text))
 
 # ====== Function lines ======
 class EditorLineRepl(ttk.Frame):
@@ -339,9 +443,11 @@ class EditorLineRepl(ttk.Frame):
                 fmap = {}
             return (file_key, _copy.deepcopy(fmap))
 
-    def __init__(self, master, data: Dict[str, Dict[str, List[Tuple[str,str]]]], file_path: str):
+    def __init__(self, master, data: Dict[str, Dict[str, List[Tuple[str,str]]]], file_path: str, *, funmap: Optional[Dict[str, Dict[str, str]]] = None, funmap_file_key: Optional[str] = None):
         super().__init__(master, padding=10); _ttk_setup()
         self.data = data; self.file = file_path
+        self._funmap = funmap or {}
+        self._funmap_file = funmap_file_key or file_path
 
         self._current_fun: Optional[str] = None
         self._current_pair_idx: Optional[int] = None
@@ -375,39 +481,74 @@ class EditorLineRepl(ttk.Frame):
         self.grid_columnconfigure(2, weight=1)    
         
         
-        # ==== left column
-        left_wrap = tk.Frame(self, bg=C_BG); left_wrap.grid(row=1, column=0, sticky="nsew")
-        
-        tk.Label(left_wrap, text="Functions", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).pack(anchor="w")
-        self.fn_scroll = Scrollable(left_wrap); self.fn_scroll.pack(fill="both", expand=True, pady=(4,0))
+        # ==== left column (GRID - footer never disappears)
+        left_wrap = tk.Frame(self, bg=C_BG)
+        left_wrap.grid(row=1, column=0, sticky="nsew")
 
-        footer_fn = tk.Frame(left_wrap, bg=C_BG); footer_fn.pack(fill="x", pady=(6,4))
-        
-        
-        
-        
-        
+        left_wrap.grid_columnconfigure(0, weight=1)
+        left_wrap.grid_rowconfigure(1, weight=1)  # scrollable grows/shrinks
+
+        tk.Label(left_wrap, text="Functions", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD)\
+            .grid(row=0, column=0, sticky="w")
+
+        self.fn_scroll = Scrollable(left_wrap)
+        self.fn_scroll.grid(row=1, column=0, sticky="nsew", pady=(4,0))
+
+        footer_fn = tk.Frame(left_wrap, bg=C_BG)
+        footer_fn.grid(row=2, column=0, sticky="ew", pady=(6,4))
+        footer_fn.grid_columnconfigure(0, weight=1)
+
         self.e_fun = InputText(footer_fn, "Enter function name...")
-        self.e_fun.pack(side="left", fill="x", expand=True, pady=(8, 0))        
+        self.e_fun.grid(row=0, column=0, sticky="ew", pady=(8,0))
         self.e_fun.bind("<Return>", lambda e: (self._add_fun(), "break"))
-        
-        # Button: Add function key
-        Icon.Button(footer_fn, "add", command=self._add_fun,
-            tooltip="Adds a new function to edit",pack={"side": "left", "padx": (8, 0), "pady": (8, 0)})
+
+        Icon.Button(
+            footer_fn, "add",
+            command=self._add_fun,
+            tooltip="Adds a new function to edit",
+            grid={"row": 0, "column": 1, "padx": (8, 0), "pady": (8, 0), "sticky": "e"}
+        )
         
         VSeparator(self).grid(row=1, column=1, sticky="ns", padx=10)
 
         # right column
-        right_wrap = tk.Frame(self, bg=C_BG); right_wrap.grid(row=1, column=2, sticky="nsew")
-        self.pairs_scroll = Scrollable(right_wrap); self.pairs_scroll.pack(fill="both", expand=True, pady=(4,0))
+        right_wrap = tk.Frame(self, bg=C_BG)
+        right_wrap.grid(row=1, column=2, sticky="nsew")
+
+        right_wrap.grid_columnconfigure(0, weight=1)
+        right_wrap.grid_rowconfigure(0, weight=1)  # scrollable grows/shrinks
+
+        self.pairs_scroll = Scrollable(right_wrap)
+        self.pairs_scroll.grid(row=0, column=0, sticky="nsew", pady=(4,0))
+
+        def _has_ancestor(w, cls):
+            while w is not None:
+                if isinstance(w, cls):
+                    return True
+                w = getattr(w, "master", None)
+            return False
+
+        def _bg_left_click(e):
+            # click on empty space in left panel -> deselect function
+            if _has_ancestor(e.widget, FunctionCard):
+                return
+            self._deselect_function()
+            try:
+                self.focus_set()
+            except Exception:
+                pass
+
+        self.fn_scroll.inner.bind("<Button-1>", _bg_left_click, add="+")
+        self.fn_scroll.canvas.bind("<Button-1>", _bg_left_click, add="+")
+
 
         def _bg_click(_e=None):
             self._deselect_pair(); self.focus_set()
-        self.pairs_scroll.inner.bind("<Button-1>", _bg_click)
-        self.pairs_scroll.canvas.bind("<Button-1>", _bg_click)
-
+        #self.pairs_scroll.inner.bind("<Button-1>", _bg_click)
+        #self.pairs_scroll.canvas.bind("<Button-1>", _bg_click)
+        
         footer_pairs = tk.Frame(right_wrap, bg=C_BG)
-        footer_pairs.pack(fill="x", pady=(8,0))
+        footer_pairs.grid(row=1, column=0, sticky="ew", pady=(8,0))
         
         # Button: Add new pair
         self.plus_pair = Icon.Button(
@@ -415,27 +556,113 @@ class EditorLineRepl(ttk.Frame):
             pack={"side": "left", "padx": (0, 6), "pady": (3, 0)})
 
         self.editors_container = tk.Frame(self, bg=C_BG)
-        self.editors_container.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8,0))
+        self.editors_container.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(8,0))
+        
         
         # Move up & down
         Button(footer_pairs, text="Move down", command=lambda: self._move(+1), pack={"side": "right", "padx": (0, 6), "pady": (8,0)})
         Button(footer_pairs, text="Move up", command=lambda: self._move(-1), pack={"side": "right", "padx": (0, 6), "pady": (8,0)})
 
-        
+        # Input fields        
         self.editors_container.grid_columnconfigure(0, weight=1)
         self.editors_container.grid_columnconfigure(1, weight=1)
+        self.editors_container.grid_rowconfigure(1, weight=1) 
         tk.Label(self.editors_container, text="Old", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).grid(row=0, column=0, sticky="w")
         tk.Label(self.editors_container, text="New", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).grid(row=0, column=1, sticky="w")
-        self._neutral_old = mk_text(self.editors_container, 6)
-        self._neutral_new = mk_text(self.editors_container, 6)
-        self._neutral_old.grid(row=1, column=0, sticky="nsew", padx=(0,6))
-        self._neutral_new.grid(row=1, column=1, sticky="nsew")
-        self._set_editors_enabled(self._neutral_old, self._neutral_new, False)        
+
+        # NOTE: We keep all editors gridded all the time and only switch visibility with tkraise().
+        # This avoids grid_remove()/grid() redraw flicker on selection.
+        self._stack_old = tk.Frame(self.editors_container, bg=C_BG)
+        self._stack_new = tk.Frame(self.editors_container, bg=C_BG)
+        self._stack_old.grid(row=1, column=0, sticky="nsew", padx=(0,6))
+        self._stack_new.grid(row=1, column=1, sticky="nsew")
+        self._stack_old.grid_rowconfigure(0, weight=1)
+        self._stack_old.grid_columnconfigure(0, weight=1)
+        self._stack_new.grid_rowconfigure(0, weight=1)
+        self._stack_new.grid_columnconfigure(0, weight=1)
+
+        self._neutral_old = CodeEditor(self._stack_old, height_lines=CODE_EDITOR_LINES, lock_height=True)
+        self._neutral_new = CodeEditor(self._stack_new, height_lines=CODE_EDITOR_LINES, lock_height=True)
+        self._neutral_old.grid(row=0, column=0, sticky="nsew")
+        self._neutral_new.grid(row=0, column=0, sticky="nsew")
+        self._set_editors_enabled(self._neutral_old, self._neutral_new, False)
 
         for bgw in (self, left_wrap, self.fn_scroll.inner, self.fn_scroll.canvas):
             bgw.bind("<Button-1>", lambda e: self.focus_set(), add="+")
+            
+        def _has_ancestor(w, cls):
+            while w is not None:
+                if isinstance(w, cls):
+                    return True
+                w = getattr(w, "master", None)
+            return False
+
+        def _bg_click_deselect_pair(e):
+            w = e.widget
+
+            if isinstance(w, (tk.Text, tk.Entry, ttk.Entry, tk.Button, ttk.Button)):
+                return
+
+            if _has_ancestor(w, PairCard):
+                return
+            if _has_ancestor(w, FunctionCard):
+                return
+
+            self._deselect_pair()
+            try:
+                self.focus_set()
+            except Exception:
+                pass
+
+        for wid in (self, left_wrap, right_wrap, footer_pairs, self.editors_container, top, hdr,
+                    self.fn_scroll.canvas, self.fn_scroll.inner,
+                    self.pairs_scroll.canvas, self.pairs_scroll.inner):
+            try:
+                wid.bind("<Button-1>", _bg_click_deselect_pair, add="+")
+            except Exception:
+                pass
+
+        def _locked_map() -> Dict[str, str]:
+            m = self._funmap.get(self._funmap_file, {})
+            return m if isinstance(m, dict) else {}
+
+        def _is_fun_locked(fn: str) -> bool:
+            # locked = function exists in "Functions" mapping for this file (even if path is empty string)
+            try:
+                return fn in self._locked_map()
+            except Exception:
+                return False
+
+        def _show_locked_info(fn: str):
+            messagebox.showinfo(
+                "Locked function",
+                f"'{fn}' is replaced in the 'Functions' tab.\n\n"
+                "You can't edit it in 'Function lines' because it would conflict.\n"
+                "Remove it from 'Functions' (or remove it from 'Function lines') first."
+            )
+
+        def _clear_pairs_panel():
+            try:
+                for w in self.pairs_scroll.inner.winfo_children():
+                    w.destroy()
+            except Exception:
+                pass
+
+        self._locked_map = _locked_map
+        self._is_fun_locked = _is_fun_locked
+        self._show_locked_info = _show_locked_info
+        self._clear_pairs_panel = _clear_pairs_panel
+
+        try:
+            self.winfo_toplevel().bind("<<ReplacementsChanged>>", add="+")
+        except Exception:
+            pass
 
         self._render_functions()
+        
+        
+        
+
 
 
 
@@ -461,12 +688,13 @@ class EditorLineRepl(ttk.Frame):
                 pass
 
     def _set_editors_enabled(self, t_old: "tk.Text", t_new: "tk.Text", enabled: bool):
-        set_texts_enabled(enabled, t_old, t_new)
+        set_editors_enabled(enabled, t_old, t_new)
 
     def _clear_and_disable_neutral(self):
-        self._neutral_old.config(state="normal"); self._neutral_new.config(state="normal")
-        self._neutral_old.delete("1.0", "end"); self._neutral_new.delete("1.0","end")
-        self._neutral_old.config(state="disabled"); self._neutral_new.config(state="disabled")
+        self._neutral_old.set_text("")
+        self._neutral_new.set_text("")
+        self._neutral_old.set_enabled(False, hide_preview_on_disable=False)
+        self._neutral_new.set_enabled(False, hide_preview_on_disable=False)
 
     # ===== History of list-ops =====
     def _push_hist(self, op: str, data: tuple):
@@ -574,13 +802,25 @@ class EditorLineRepl(ttk.Frame):
         ch = [w for w in self.pairs_scroll.inner.winfo_children() if isinstance(w, PairCard)]
         if 0 <= idx < len(ch):
             card: PairCard = ch[idx]
-            card.lbl_top.config(text=(a or "").strip())
-            card.lbl_bot.config(text=(b or "").strip())
+            card.set_texts(a, b)
 
     def _ensure_editors_for_key(self, key: Tuple[str,int]):
         if key in self._editors_by_key: return
-        t_old = mk_text(self.editors_container, 6)
-        t_new = mk_text(self.editors_container, 6)
+        # Editors live inside the stack frames and stay gridded forever.
+        # We switch which pair is visible using tkraise() (no grid_remove/grid flicker).
+        t_old = CodeEditor(self._stack_old, height_lines=CODE_EDITOR_LINES, lock_height=True)
+        t_new = CodeEditor(self._stack_new, height_lines=CODE_EDITOR_LINES, lock_height=True)
+        t_old.grid(row=0, column=0, sticky="nsew")
+        t_new.grid(row=0, column=0, sticky="nsew")
+
+        # Start hidden behind the neutral editors.
+        try:
+            t_old.lower(self._neutral_old)
+            t_new.lower(self._neutral_new)
+        except Exception:
+            pass
+
+        self._set_editors_enabled(t_old, t_new, False)
         def _mod():
             if self._updating_from_code: return
             fun, pid = key
@@ -590,7 +830,8 @@ class EditorLineRepl(ttk.Frame):
             arr = self.data.setdefault(self.file, {}).setdefault(fun, [])
             
             if 0 <= idx < len(arr):
-                a = t_old.get("1.0","end-1c"); b = t_new.get("1.0","end-1c")
+                a = as_text(t_old).get("1.0","end-1c")
+                b = as_text(t_new).get("1.0","end-1c")            
                 arr[idx] = (a, b)
                 self._update_pair_card_inplace(fun, idx, a, b)
                 _event_changed(self)
@@ -598,31 +839,60 @@ class EditorLineRepl(ttk.Frame):
             arr_dbg = self.data.get(self.file, {}).get(fun, [])
             cur = arr_dbg[idx] if 0 <= idx < len(arr_dbg) else None
                 
-        t_old.bind("<<Modified>>", lambda e: (t_old.edit_modified(False), _mod()), add="+")
-        t_new.bind("<<Modified>>", lambda e: (t_new.edit_modified(False), _mod()), add="+")
-        t_old.edit_modified(False); t_new.edit_modified(False)
+        to = as_text(t_old)
+        tn = as_text(t_new)
+        to.bind("<<Modified>>", lambda e: (to.edit_modified(False), _mod()), add="+")
+        tn.bind("<<Modified>>", lambda e: (tn.edit_modified(False), _mod()), add="+")
+        to.edit_modified(False); tn.edit_modified(False)
         self._editors_by_key[key] = (t_old, t_new)
 
     def _show_editors_for_key(self, key: Tuple[str,int]):
-        self._neutral_old.grid_remove(); self._neutral_new.grid_remove()
-        if self._shown_key and self._shown_key in self._editors_by_key:
+        # Disable previous editors but keep them gridded.
+        if self._shown_key and self._shown_key in self._editors_by_key and self._shown_key != key:
             o, n = self._editors_by_key[self._shown_key]
-            try: o.grid_remove(); n.grid_remove()
-            except Exception: pass
+            self._set_editors_enabled(o, n, False)
+
         t_old, t_new = self._editors_by_key[key]
-        t_old.grid(row=1, column=0, sticky="nsew", padx=(0,6))
-        t_new.grid(row=1, column=1, sticky="nsew")
+
+        # Bring active editors to front.
+        try:
+            t_old.tkraise()
+            t_new.tkraise()
+        except Exception:
+            pass
+
         self._set_editors_enabled(t_old, t_new, True)
         self._shown_key = key
 
     def _disable_current_editors(self):
+        # Disable currently shown editors (if any), but keep them gridded.
         if self._shown_key and self._shown_key in self._editors_by_key:
             t_old, t_new = self._editors_by_key[self._shown_key]
             self._set_editors_enabled(t_old, t_new, False)
-        self._neutral_old.grid(row=1, column=0, sticky="nsew", padx=(0,6))
-        self._neutral_new.grid(row=1, column=1, sticky="nsew")
-        self._clear_and_disable_neutral()
 
+        # Show neutral editors on top.
+        try:
+            self._neutral_old.tkraise()
+            self._neutral_new.tkraise()
+        except Exception:
+            pass
+
+        self._clear_and_disable_neutral()
+        self._shown_key = None
+
+    def _prewarm_editors_for_fun_chunked(self, fun: str, start: int = 0, chunk: int = 4, limit: int = 60):
+        try:
+            self._ensure_ids_for_fun(fun)
+            ids = list(self._pair_ids.get(fun, []))[:max(0, int(limit))]
+            end = min(len(ids), start + max(1, int(chunk)))
+            for pid in ids[start:end]:
+                self._ensure_editors_for_key((fun, pid))
+            if end < len(ids):
+                # schedule next chunk quickly, but not blocking UI
+                self.after(1, lambda: self._prewarm_editors_for_fun_chunked(fun, end, chunk, limit))
+        except Exception:
+            pass
+    
     def _refresh_pairs_keep(self, keep_idx: Optional[int]):
         y = self.pairs_scroll.canvas.yview()
         self._render_pairs()
@@ -636,35 +906,96 @@ class EditorLineRepl(ttk.Frame):
         funs = sorted(fmap.keys()); cur = self._current_fun
         
         for fn in funs:
-            card = FunctionCard(self.fn_scroll.inner, fn, "",
-                                icon_main="function",
-                                icon_delete="remove",
-                                on_select=lambda name=fn: self._select_fun(name),
-                                on_delete=lambda name=fn: self._delete_fun(name),
-                                selected=(fn==cur))
+            locked = self._is_fun_locked(fn)
+
+            card = FunctionCard(
+                self.fn_scroll.inner, fn, "",
+                icon_main="function",
+                icon_delete="remove",
+                on_select=(lambda name=fn: self._select_fun(name)) if not locked else (lambda name=fn: self._show_locked_info(name)),
+                on_delete=lambda name=fn: self._delete_fun(name),
+                selected=(fn == cur and not locked)
+            )
             card.pack(fill="x", padx=(0,10), pady=0)
+            if locked:
+                try:
+                    card.configure(cursor="arrow")
+                    card.lbl_title.configure(fg=COLOR.get("text_disabled", C_SUB))
+                    _set_bg_recursive(card, CARD_BG_DISABLED)
+                    card._hover = lambda *_: None  # disable hover visuals
+                    Icon.bg_changed(card)
+                except Exception:
+                    pass
             self._bind_wheel_relay(card, self.fn_scroll.canvas)
             for w in card.winfo_children():
-                self._bind_wheel_relay(w, self.fn_scroll.canvas)       
-        if funs and cur not in funs: self._select_fun(funs[0])
-        elif cur: self._render_pairs()
+                self._bind_wheel_relay(w, self.fn_scroll.canvas)
+                
+        if cur and self._is_fun_locked(cur):
+            self._current_fun = None
+            self._current_pair_idx = None
+            self._disable_current_editors()
+            self._clear_pairs_panel()
+
+    def _deselect_function(self):
+        self._current_fun = None
+        self._current_pair_idx = None
+
+        # unselect all function cards
+        for w in self.fn_scroll.inner.winfo_children():
+            if isinstance(w, FunctionCard):
+                w.set_selected(False)
+
+        # clear pairs list + disable editors
+        self._disable_current_editors()
+        self._clear_pairs_panel()
 
     def _select_fun(self, name: str):
+        if self._current_fun == name:
+            self._deselect_function()
+            return
+        
+        # If locked by 'Functions' mapping -> don't allow editing in Function lines
+        if self._is_fun_locked(name):
+            self._show_locked_info(name)
+
+            # hard-reset UI (neutral editors, no pairs)
+            self._current_fun = None
+            self._current_pair_idx = None
+            for w in self.fn_scroll.inner.winfo_children():
+                if isinstance(w, FunctionCard):
+                    w.set_selected(False)
+            self._disable_current_editors()
+            self._clear_pairs_panel()
+            return
+
         self._current_fun = name
         for w in self.fn_scroll.inner.winfo_children():
             if isinstance(w, FunctionCard):
-                w.set_selected(w.lbl_title.cget("text")==name)
+                w.set_selected(w.lbl_title.cget("text") == name)
         self._current_pair_idx = None
         self._disable_current_editors()
         self._ensure_ids_for_fun(name)
         self._render_pairs()
 
+        # Pre-create editors to avoid the "first click" flash.
+        ids = list(self._pair_ids.get(name, []))
+        if ids:
+            self._ensure_editors_for_key((name, ids[0]))
+            try:
+                self.after_idle(lambda n=name: self._prewarm_editors_for_fun_chunked(n, start=0, chunk=4, limit=60))
+            except Exception:
+                pass
+
     def _add_fun(self):
         name = self.e_fun.get().strip()
-        if not name: return
+        if not name:
+            return
+        if self._is_fun_locked(name):
+            self._show_locked_info(name)
+            self.e_fun.set_text("")
+            return
         self._push_hist("ADD_FUN", (name,))
         self._add_fun_raw(name)
-        #self.e_fun.delete(0, "end")
         self.e_fun.set_text("")
 
     def _delete_fun(self, name: str):
@@ -712,33 +1043,47 @@ class EditorLineRepl(ttk.Frame):
         if not fn: return
         key = self._get_key_for_index(fn, idx)
         if not key: return
-        a, b = self.data[self.file][fn][idx]
-        a_fmt = _pretty_block_for_editor(a)
-        b_fmt = _pretty_block_for_editor(b)
-        # persist formatting immediately (so Save writes the pretty version)
-        self.data[self.file][fn][idx] = (a_fmt, b_fmt)
 
+        # If the same pair is clicked again, only update selection.
+        if self._shown_key == key:
+            self._select_pair(idx)
+            return
+        a, b = self.data[self.file][fn][idx]
+        a_raw, b_raw = a, b
         self._ensure_editors_for_key(key)
         self._updating_from_code = True
         try:
             t_old, t_new = self._editors_by_key[key]
             self._show_editors_for_key(key)
-            t_old.delete("1.0","end"); t_old.insert("1.0", a_fmt)
-            t_new.delete("1.0","end"); t_new.insert("1.0", b_fmt)
-            t_old.edit_reset(); t_old.edit_separator()
-            t_new.edit_reset(); t_new.edit_separator()
+            to = as_text(t_old); tn = as_text(t_new)
+            to.config(state="normal"); tn.config(state="normal")
+            # Only rewrite text if it actually changed (helps avoid tiny redraw flashes).
+            cur_a = to.get("1.0", "end-1c")
+            cur_b = tn.get("1.0", "end-1c")
+            if cur_a != a_raw:
+                to.delete("1.0", "end")
+                to.insert("1.0", a_raw)
+            if cur_b != b_raw:
+                tn.delete("1.0", "end")
+                tn.insert("1.0", b_raw)
+            to.edit_reset(); to.edit_separator(); tn.edit_reset(); tn.edit_separator()
         finally:
             self._updating_from_code = False
         self._select_pair(idx)
 
     def _delete_pair_by_index(self, idx: int):
         fn = self._current_fun
-        if not fn: return
+        if not fn:
+            return
+        key_before = self._get_key_for_index(fn, idx)
         arr = self.data[self.file][fn]
         val = arr[idx] if 0 <= idx < len(arr) else ("","")
         pid = self._pair_ids.get(fn, [])[idx] if 0 <= idx < len(self._pair_ids.get(fn, [])) else next(self._id_counter)
         self._push_hist("DEL_PAIR", (fn, idx, val, pid))
         self._del_pair_raw(fn, idx)
+        if key_before is not None and self._shown_key == key_before:
+            self._deselect_pair()
+            self._shown_key = None
 
     def _add(self):
         fn = self._current_fun
@@ -749,6 +1094,7 @@ class EditorLineRepl(ttk.Frame):
         val = ("","")
         self._push_hist("ADD_PAIR", (fn, idx, val))
         self._add_pair_raw(fn, idx, val)
+        self._edit_into_fields(self._current_pair_idx)
 
     def _move(self, d: int):
         fn = self._current_fun; idx = self._current_pair_idx
@@ -823,9 +1169,11 @@ class EditorFunctionMappings(ttk.Frame):
                 fmap = {}
             return (file_key, _copy.deepcopy(fmap))
 
-    def __init__(self, master, data: Dict[str, Dict[str,str]], file_path: str):
+    def __init__(self, master, data: Dict[str, Dict[str,str]], file_path: str, *, linemap=None, linemap_file_key=None):
         super().__init__(master, padding=10); _ttk_setup()
         self.data = data; self.file = file_path
+        self._linemap = linemap or {}
+        self._linemap_file = linemap_file_key or file_path
 
         self._selected: Optional[str] = None
         self._hist: List[Tuple[str, tuple]] = []; self._redo: List[Tuple[str, tuple]] = []; self._replaying=False
@@ -845,19 +1193,33 @@ class EditorFunctionMappings(ttk.Frame):
         self.grid_rowconfigure(1, weight=1); self.grid_columnconfigure(2, weight=1)
 
         # LEFT PANEL (Functions)
-        left = tk.Frame(self, bg=C_BG); left.grid(row=1, column=0, sticky="nsew")
-        tk.Label(left, text="Functions", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).pack(anchor="w")
-        self.scroll = Scrollable(left); self.scroll.pack(fill="both", expand=True, pady=(4,0)) #scroll
-        
-        # Footer
+        left = tk.Frame(self, bg=C_BG)
+        left.grid(row=1, column=0, sticky="nsew")
+
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)  # scrollable grows/shrinks
+
+        tk.Label(left, text="Functions", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD)\
+            .grid(row=0, column=0, sticky="w")
+
+        self.scroll = Scrollable(left)
+        self.scroll.grid(row=1, column=0, sticky="nsew", pady=(4,0))
+
+        # Footer (fixed row)
         footer_fn = tk.Frame(left, bg=C_BG)
-        footer_fn.pack(fill="x", pady=(6,4))        
+        footer_fn.grid(row=2, column=0, sticky="ew", pady=(6,4))
+        footer_fn.grid_columnconfigure(0, weight=1)
+
         self.e_newfun = InputText(footer_fn, "Enter function name...")
-        self.e_newfun.pack(side="left", fill="x", expand=True, pady=(8, 0))                    
-                
+        self.e_newfun.grid(row=0, column=0, sticky="ew", pady=(8,0))
+
         # Button - add
-        self.plus_pair = Icon.Button(footer_fn, "add", command=self._new_function, 
-            tooltip="Add function key", pack={"side": "left", "padx": (8,0), "pady": (8,0)})    
+        Icon.Button(
+            footer_fn, "add",
+            command=self._new_function,
+            tooltip="Add function key",
+            grid={"row": 0, "column": 1, "padx": (8,0), "pady": (8,0), "sticky": "e"}
+        )
 
         VSeparator(self).grid(row=1, column=1, sticky="ns", padx=10)
 
@@ -927,6 +1289,9 @@ class EditorFunctionMappings(ttk.Frame):
         self._hist.append((op,data))
 
     def _set_raw(self, fn: str, path: Optional[str]):
+        if self._has_line_edits(fn):
+            self._warn_conflict(fn)
+            return
         if path is None:
             if fn in self.data.setdefault(self.file, {}): del self.data[self.file][fn]
         else:
@@ -963,6 +1328,10 @@ class EditorFunctionMappings(ttk.Frame):
 
     def _new_function(self):
         fn = (self.e_newfun.get() or "").strip()
+        if self._has_line_edits(fn):
+            self._warn_conflict(fn)
+            self.e_newfun.set_text("")
+            return
         if not fn: return
         if fn in self.data.setdefault(self.file, {}):
             self._select(fn)
@@ -1008,6 +1377,22 @@ class EditorFunctionMappings(ttk.Frame):
                 self._push("SET", (fn, old))
                 self._set_raw(fn, name_only)
 
+    def _has_line_edits(self, fn: str) -> bool:
+        try:
+            fmap = self._linemap.get(self._linemap_file, {})
+            arr = fmap.get(fn, [])
+            return bool(arr)  # list of pairs exists and not empty
+        except Exception:
+            return False
+
+    def _warn_conflict(self, fn: str):
+        messagebox.showwarning(
+            "Conflict",
+            f"'{fn}' is already edited in 'Function lines'.\n\n"
+            "You can't add it to 'Functions' because it would conflict.\n"
+            "Remove it from 'Function lines' first."
+        )
+
     # navigation (delegated by window)
     def _nav_up(self, e=None):
         fw = self.focus_get()
@@ -1025,6 +1410,8 @@ class EditorFunctionMappings(ttk.Frame):
             i = items.index(self._selected)
             if i < len(items)-1: self._select(items[i+1])
         return "break"
+
+
 
 # ====== General lines ======
 class EditorGeneralPairs(ttk.Frame):
@@ -1059,7 +1446,7 @@ class EditorGeneralPairs(ttk.Frame):
         self._idx: Optional[int]=None
         self._hist: List[Tuple[str, tuple]]=[]; self._redo: List[Tuple[str, tuple]]=[]; self._replaying=False
 
-        top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=2, sticky="ew")             
+        top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, sticky="ew")           
         hdr = tk.Frame(top, bg=C_BG)
         hdr.pack(fill="x")  
         tk.Label(hdr, text="Replace general lines", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
@@ -1069,31 +1456,78 @@ class EditorGeneralPairs(ttk.Frame):
             "Here you can replace lines of code which are outside of any function, e.g., when you want to change a declared variable. "
             "Use this option only when the standard 'Function lines' isn't enough."
         )
+        # columns / rows
+        self.grid_rowconfigure(1, weight=1)   # lists area
+        self.grid_rowconfigure(2, weight=0)   # editors area
+        self.grid_rowconfigure(3, weight=0)   # mv row
+        self.grid_columnconfigure(0, weight=1)
 
-        self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
+        listfrm = tk.Frame(self, bg=C_BG)
+        listfrm.grid(row=1, column=0, sticky="nsew")
 
-        listfrm = tk.Frame(self, bg=C_BG); listfrm.grid(row=1, column=0, sticky="nsew")
-        self.scroll = Scrollable(listfrm); self.scroll.pack(fill="both", expand=True, pady=(4,0))
-        
-        # Buttons:
-        self.plus_pair = Icon.Button(
-            listfrm, "add", command=self._add, tooltip="Add new pair", pack={"side": "left", "padx": (0,0), "pady": (8,0)}) 
-        Button(listfrm, text="Move down", command=lambda: self._move(+1), pack={"side": "right", "padx": (0, 6), "pady": (8,0)})
-        Button(listfrm, text="Move up",   command=lambda: self._move(-1), pack={"side": "right", "padx": (0, 6), "pady": (8,0)})
-        
+        listfrm.grid_columnconfigure(0, weight=1)
+        listfrm.grid_rowconfigure(0, weight=1)  # scroll grows/shrinks
 
-        ed = tk.Frame(self, bg=C_BG); ed.grid(row=2, column=0, sticky="ew", pady=(8,0))
-        ed.grid_columnconfigure(0, weight=1); ed.grid_columnconfigure(1, weight=1)
+        # Scrollable (row 0)
+        self.scroll = Scrollable(listfrm)
+        self.scroll.grid(row=0, column=0, sticky="nsew", pady=(4,0))
+
+        # Footer (row 1)
+        footer = tk.Frame(listfrm, bg=C_BG)
+        footer.grid(row=1, column=0, sticky="ew", pady=(8,0))
+        footer.grid_columnconfigure(0, weight=1)
+
+        # Add (left)
+        Icon.Button(
+            footer, "add",
+            command=self._add,
+            tooltip="Add new pair",
+            pack={"side": "left", "padx": (0, 6), "pady": (0,0)}
+        )
+
+        # Move buttons (right)
+        Button(footer, text="Move down", command=lambda: self._move(+1),
+            pack={"side": "right", "padx": (0, 6), "pady": (0,0)})
+        Button(footer, text="Move up", command=lambda: self._move(-1),
+            pack={"side": "right", "padx": (0, 6), "pady": (0,0)})
+
+        ed = tk.Frame(self, bg=C_BG); ed.grid(row=2, column=0, sticky="nsew", pady=(8,0))
+        ed.grid_columnconfigure(0, weight=1); ed.grid_columnconfigure(1, weight=1); ed.grid_rowconfigure(1, weight=0)
         tk.Label(ed, text="Old", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).grid(row=0, column=0, sticky="w")
         tk.Label(ed, text="New", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).grid(row=0, column=1, sticky="w")
-        self.t_old = mk_text(ed, 6); self.t_new = mk_text(ed, 6)
-        self.t_old.grid(row=1, column=0, sticky="nsew", padx=(0,6)); self.t_new.grid(row=1, column=1, sticky="nsew")
+        
+        # Input fields
+        self.t_old = CodeEditor(ed, height_lines=CODE_EDITOR_LINES, lock_height=True); self.t_new = CodeEditor(ed, height_lines=CODE_EDITOR_LINES, lock_height=True)        
+        self.t_old.grid(row=1, column=0, sticky="nsew", padx=(0,6));  self.t_new.grid(row=1, column=1, sticky="nsew")
         self._set_enabled(False)
 
         mv = tk.Frame(self, bg=C_BG); mv.grid(row=3, column=0, sticky="ew", pady=(8,0))
 
         self._skip_autoselect = False
         self._render()
+
+
+        def _has_ancestor(w, cls):
+            while w is not None:
+                if isinstance(w, cls):
+                    return True
+                w = getattr(w, "master", None)
+            return False
+
+        def _bg_click_deselect(e):
+            w = e.widget
+            if isinstance(w, (tk.Text, tk.Entry, ttk.Entry, tk.Button, ttk.Button)): # ignore clicks inside editors / inputs / buttons
+                return            
+            if _has_ancestor(w, PairCard): # ignore clicks on a PairCard (or its children)
+                return
+
+            self._deselect()
+
+        for wid in (self, top, hdr, listfrm, footer, ed, mv, self.scroll.canvas, self.scroll.inner):
+            try:
+                wid.bind("<Button-1>", _bg_click_deselect, add="+")
+            except Exception:
+                pass
 
         # Delete: Also from text, if no selection
         def _on_del(e=None):
@@ -1111,14 +1545,13 @@ class EditorGeneralPairs(ttk.Frame):
             bg.bind("<Button-1>", lambda e: self._deselect())
 
     def _set_enabled(self, en: bool):
-        set_texts_enabled(en, self.t_old, self.t_new)
+        set_editors_enabled(en, self.t_old, self.t_new)
 
     def _update_card_inplace(self, idx:int, a:str, b:str):
         ch = [w for w in self.scroll.inner.winfo_children() if isinstance(w, PairCard)]
         if 0 <= idx < len(ch):
             card: PairCard = ch[idx]
-            card.lbl_top.config(text=(a or "").strip())
-            card.lbl_bot.config(text=(b or "").strip())
+            card.set_texts(a, b)
 
     def _render(self):
         for w in self.scroll.inner.winfo_children(): w.destroy()
@@ -1139,12 +1572,18 @@ class EditorGeneralPairs(ttk.Frame):
             if self._idx is None: return
             arr = self.data.setdefault(self.file, [])
             if not (0 <= self._idx < len(arr)): return
-            a = self.t_old.get("1.0","end-1c"); b = self.t_new.get("1.0","end-1c")
+            a = self.t_old.get(); b = self.t_new.get()
             arr[self._idx] = (a, b)
             self._update_card_inplace(self._idx, a, b)
             _event_changed(self)
-        self.t_old.bind("<<Modified>>", lambda e: (self.t_old.edit_modified(False), _mod()), add="+")
-        self.t_new.bind("<<Modified>>", lambda e: (self.t_new.edit_modified(False), _mod()), add="+")
+        to = as_text(self.t_old)
+        tn = as_text(self.t_new)
+        to.bind("<<Modified>>", lambda e: (to.edit_modified(False), _mod()), add="+")
+        tn.bind("<<Modified>>", lambda e: (tn.edit_modified(False), _mod()), add="+")
+
+
+
+
 
     def _refresh_keep(self, keep):
         y = self.scroll.canvas.yview(); self._render(); self.scroll.canvas.yview_moveto(y[0]); self._select(keep)
@@ -1164,13 +1603,22 @@ class EditorGeneralPairs(ttk.Frame):
         arr[idx] = (a_fmt, b_fmt)
 
         self._set_enabled(True)
-        self.t_old.delete("1.0","end"); self.t_old.insert("1.0", a_fmt); self.t_old.edit_reset(); self.t_old.edit_separator()
-        self.t_new.delete("1.0","end"); self.t_new.insert("1.0", b_fmt); self.t_new.edit_reset(); self.t_new.edit_separator()
-
+        self.t_old.set_text(a_fmt)
+        self.t_new.set_text(b_fmt)
+        to = as_text(self.t_old); tn = as_text(self.t_new)
+        to.edit_reset(); to.edit_separator()
+        tn.edit_reset(); tn.edit_separator()
+        
     def _deselect(self):
         self._idx = None
         for w in self.scroll.inner.winfo_children():
-            if isinstance(w, PairCard): w.set_selected(False)
+            if isinstance(w, PairCard):
+                w.set_selected(False)
+        try:
+            self.t_old.set_text("")
+            self.t_new.set_text("")
+        except Exception:
+            pass
         self._set_enabled(False)
 
     def _push(self, op,data):
@@ -1216,7 +1664,10 @@ class EditorGeneralPairs(ttk.Frame):
     def _add(self):
         arr = self.data.setdefault(self.file, [])
         idx = self._idx+1 if self._idx is not None else len(arr)
-        val = ("",""); self._push("ADD",(idx,val)); self._raw_insert(idx,val)
+        val = ("", "")
+        self._push("ADD", (idx, val))
+        self._raw_insert(idx, val)
+        self._edit(idx)
     def _del(self, idx):
         arr = self.data.setdefault(self.file, [])
         if not (0<=idx<len(arr)): return
@@ -1355,19 +1806,32 @@ class EditorAdditions(ttk.Frame):
 
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
 
-        listfrm = tk.Frame(self, bg=C_BG); listfrm.grid(row=1, column=0, sticky="nsew")
-        self.scroll = Scrollable(listfrm); self.scroll.pack(fill="both", expand=True, pady=(4,0))
-        
-        fbar = tk.Frame(listfrm, bg=C_BG); fbar.pack(fill="x", pady=(6,4))
-        # Button: Add new pair
+        listfrm = tk.Frame(self, bg=C_BG)
+        listfrm.grid(row=1, column=0, sticky="nsew")
+
+        listfrm.grid_columnconfigure(0, weight=1)
+        listfrm.grid_rowconfigure(0, weight=1)  # scroll grows/shrinks
+
+        # Scrollable (row 0)
+        self.scroll = Scrollable(listfrm)
+        self.scroll.grid(row=0, column=0, sticky="nsew", pady=(4,0))
+
+        # Footer (row 1) - fixed
+        fbar = tk.Frame(listfrm, bg=C_BG)
+        fbar.grid(row=1, column=0, sticky="ew", pady=(6,4))
+
         self.plus_pair = Icon.Button(
-            fbar, "add", command=self._add, tooltip="Add new entry", pack={"side": "left", "padx": (0,0)}) 
+            fbar, "add",
+            command=self._add,
+            tooltip="Add new entry",
+            pack={"side": "left", "padx": (0,0)}
+        )
 
 
 
 
-        ed = tk.Frame(self, bg=C_BG); ed.grid(row=2, column=0, sticky="ew", pady=(8,0))
-        ed.grid_columnconfigure(0, weight=1)
+        ed = tk.Frame(self, bg=C_BG); ed.grid(row=2, column=0, sticky="nsew", pady=(8,0))
+        ed.grid_columnconfigure(0, weight=1); ed.grid_rowconfigure(1, weight=1)
         tk.Label(ed, text="Position", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).grid(row=0, column=0, sticky="w")
         pos = tk.Frame(ed, bg=C_BG); pos.grid(row=1, column=0, sticky="w", pady=(0,6))
         self.pos_var = tk.StringVar(value="end")
@@ -1379,19 +1843,48 @@ class EditorAdditions(ttk.Frame):
                              selectcolor=C_PANEL_SEL, highlightthickness=0, state="disabled")
         self.rb_begin.pack(side="left"); self.rb_end.pack(side="left", padx=(10,0))
         tk.Label(ed, text="Text", bg=C_BG, fg=C_SUB, font=FONT_BASE_BOLD).grid(row=2, column=0, sticky="w")
-        self.t = mk_text(ed, 8); self.t.grid(row=3, column=0, sticky="nsew"); self.t.config(state="disabled")
+        self.t = CodeEditor(ed, height_lines=CODE_EDITOR_LINES, lock_height=True); self.t.grid(row=3, column=0, sticky="nsew"); self.t.set_enabled(False, hide_preview_on_disable=False)
 
         self._skip_autoselect = False
         self._render()
+        def _has_ancestor(w, cls):
+            while w is not None:
+                if isinstance(w, cls):
+                    return True
+                w = getattr(w, "master", None)
+            return False
+
+        def _bg_click_deselect(e):
+            w = e.widget
+
+            # ignore clicks inside editor / inputs / buttons
+            if isinstance(w, (tk.Text, tk.Entry, ttk.Entry, tk.Button, ttk.Button)):
+                return
+            # radiobuttons too
+            if isinstance(w, tk.Radiobutton):
+                return
+            # ignore clicks on PairCard (or its children)
+            if _has_ancestor(w, PairCard):
+                return
+
+            self._deselect()
+
+        for wid in (self, top, hdr, listfrm, fbar, ed, pos, self.scroll.canvas, self.scroll.inner):
+            try:
+                wid.bind("<Button-1>", _bg_click_deselect, add="+")
+            except Exception:
+                pass
+        
 
         def _mod(_e=None):
             if self._idx is None: return
             arr = self._arr()
             if not (0<=self._idx<len(arr)): return
-            arr[self._idx] = (self.pos_var.get(), self.t.get("1.0","end-1c"))
+            arr[self._idx] = (self.pos_var.get(), self.t.get())
             self._update_card_inplace(self._idx)
             _event_changed(self)
-        self.t.bind("<<Modified>>", lambda e: (self.t.edit_modified(False), _mod()), add="+")
+        t_txt = as_text(self.t)
+        t_txt.bind("<<Modified>>", lambda e: (t_txt.edit_modified(False), _mod()), add="+")
         self.pos_var.trace_add("write", lambda *_: _mod())
 
         # DELETE: works even if focus in Text, as long as no selection
@@ -1413,7 +1906,7 @@ class EditorAdditions(ttk.Frame):
         if self._idx is None: return
         arr = self._arr()
         if 0 <= self._idx < len(arr):
-            arr[self._idx] = (self.pos_var.get(), self.t.get("1.0","end-1c"))
+            arr[self._idx] = (self.pos_var.get(), self.t.get())
 
     def _arr(self) -> List[AdditionItem]:
         raw = self.data.setdefault(self.file, [])
@@ -1447,8 +1940,8 @@ class EditorAdditions(ttk.Frame):
         if 0 <= idx < len(ch):
             pos, txt = self._arr()[idx]
             card: PairCard = ch[idx]
-            card.lbl_top.config(text=f"[{pos.upper()}]")
-            card.lbl_bot.config(text=(txt or "").strip())
+            card.set_texts(f"[{pos.upper()}]", txt)
+            card.lbl_top.configure(fg="#9fd1ff")
 
     def _render_keep(self, keep):
         y = self.scroll.canvas.yview(); self._render(); self.scroll.canvas.yview_moveto(y[0]); self._select(keep)
@@ -1460,17 +1953,19 @@ class EditorAdditions(ttk.Frame):
         if not (0<=idx<len(self._arr())): return
         pos, txt = self._arr()[idx]; self._select(idx)
         self.rb_begin.config(state="normal"); self.rb_end.config(state="normal")
-        self.t.config(state="normal")
+        self.t.set_enabled(True, hide_preview_on_disable=False)
         self.pos_var.set(pos)
-        self.t.delete("1.0","end"); self.t.insert("1.0", txt)
-        self.t.edit_reset(); self.t.edit_separator()
+        self.t.set_text(txt)
+        t_txt = as_text(self.t)
+        t_txt.edit_reset(); t_txt.edit_separator()
     def _deselect(self):
         self._idx=None
         for w in self.scroll.inner.winfo_children():
             if isinstance(w, PairCard): w.set_selected(False)
         # lock and clear editors
         self.rb_begin.config(state="disabled"); self.rb_end.config(state="disabled")
-        self.t.config(state="normal"); self.t.delete("1.0","end"); self.t.config(state="disabled")
+        self.t.set_text("")
+        self.t.set_enabled(False, hide_preview_on_disable=False)
 
     def _push(self,op,data):
         if self._replaying: return
@@ -1514,9 +2009,12 @@ class EditorAdditions(ttk.Frame):
         self._render_keep(j); _event_changed(self)
 
     def _add(self):
-        arr=self._arr(); idx = self._idx+1 if self._idx is not None else len(arr)
-        val=("end","")
-        self._push("ADD",(idx,val)); self._raw_insert(idx,val)
+        arr = self._arr()
+        idx = self._idx + 1 if self._idx is not None else len(arr)
+        val = ("end", "")
+        self._push("ADD", (idx, val))
+        self._raw_insert(idx, val)
+        self._edit(idx)
     def _del(self, idx):
         arr=self._arr()
         if not (0<=idx<len(arr)): return
@@ -1562,48 +2060,256 @@ class EditorAdditions(ttk.Frame):
 
 # ====== Files (single mapping for the file) ======
 class EditorFileMap(ttk.Frame):
-    def __init__(self, master, data: Dict[str,str], file_path: str):
-        super().__init__(master, padding=10); _ttk_setup()
-        self.data = data; self.file = file_path
-        self.columnconfigure(1, weight=1)   
-        
-        top = tk.Frame(self, bg=C_BG); top.grid(row=0, column=0, columnspan=2, sticky="ew")     
+    """
+    Whole-file replacement tab:
+    - Big status (ACTIVE / NOT USED)
+    - Filename-only mapping (stored under FILE_REPLACEMENTS)
+    - Button opens MOD/replacements/files (prompts Generate if missing)
+    - Warning if typed filename does not exist in replacements/files
+      (only when folder exists and is not empty)
+    """
+
+    save_key = "FILE_REPLACEMENTS"
+
+    def export_for_file(self):
+        import copy as _copy
+        file_key = getattr(self, "file", None)
+        if not file_key:
+            return None
+        cur = self.data.get(file_key, "")
+        return (file_key, _copy.deepcopy(cur))
+
+    def __init__(self, master, data: Dict[str, str], file_path: str, mod_dir: Optional[Path] = None):
+        super().__init__(master, padding=10)
+        _ttk_setup()
+
+        self.data = data
+        self.file = file_path
+        self.mod_dir = mod_dir
+
+        # Layout
+        self.grid_columnconfigure(0, weight=1)
+
+        top = tk.Frame(self, bg=C_BG)
+        top.grid(row=0, column=0, sticky="ew")
+
         hdr = tk.Frame(top, bg=C_BG)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="Replace whole files", font=FONT_TITLE_H2, bg=C_BG, fg=C_TEXT).pack(side="left")
-        #tk.Label(hdr, text=f"{file_path}", font=FONT_BASE_BOLD, bg=C_BG, fg=C_SUB).pack(side="right")
-        
-        
-        ttk.Label(self, text="Replacement filename:", font=FONT_BASE_BOLD).grid(row=1, column=0, sticky="e", pady=(10,0))        
-        self.e = InputText(self, "e.g. cabin.c (no path!)")
-        self.e.grid(row=1, column=1, sticky="ew", padx=(6,0), pady=(10,0))
+        tk.Label(
+            hdr,
+            text="Replace whole files",
+            font=FONT_TITLE_H2,
+            bg=C_BG,
+            fg=C_TEXT
+        ).pack(side="left")
+
         add_tip(
             top,
-            "A panel for the most drastic code swap — a completele replacement of the file. "
-            "It't not recommended to use this option, as it makes the whole file incompatible with other mods. But sometimes it's useful when there's just no other way "
-            "(e.g., replacing complex .ini files). Use it with caution!"
+            "This is the most aggressive replacement: the entire file is swapped. "
+            "If ACTIVE, the vanilla file will be replaced with your provided file.\n\n"
+            "It's not recommended because it makes the whole file incompatible with other mods. "
+            "But sometimes it's useful when there's just no other way (e.g., replacing complex .ini files).\n\n"
+            "Tip: keep the filename only. Put the file into MOD/replacements/files/."
         )
+
+
+        # --- Status Card ---
+        self.card = tk.Frame(self, bg=CARD_BG, highlightthickness=1, highlightbackground=C_BORDER, bd=0)
+        self.card.grid(row=1, column=0, sticky="ew", pady=(6, 10))
+        self.card.grid_columnconfigure(1, weight=1)
+
+        self._pill = tk.Label(
+            self.card,
+            text="",
+            font=FONT_BASE_BOLD,
+            bg=C_BG,
+            fg=C_TEXT,
+            padx=10,
+            pady=4
+        )
+        self._pill.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+
+        self.status_title = tk.Label(
+            self.card,
+            text="",
+            font=FONT_TITLE_H3,
+            bg=CARD_BG,
+            fg=C_TEXT,
+            anchor="w",
+            justify="left"
+        )
+        self.status_title.grid(row=0, column=1, sticky="ew", padx=(10, 10), pady=(10, 4))
+
+        self.status_sub = tk.Label(
+            self.card,
+            text="",
+            font=FONT_BASE_MINI,
+            bg=CARD_BG,
+            fg=C_SUB,
+            anchor="w",
+            justify="left",
+            wraplength=10
+        )
+        self.status_sub.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
+
+        def _wrap_card(_e=None):
+            w = max(240, self.card.winfo_width() - 24)
+            self.status_sub.configure(wraplength=w)
+        self.card.bind("<Configure>", _wrap_card)
+        _wrap_card()
+
+        # --- Input row (same line button) ---
+        form = tk.Frame(self, bg=C_BG)
+        form.grid(row=2, column=0, sticky="ew")
+        form.grid_columnconfigure(1, weight=1)
+
+        tk.Label(form, text="Replacement filename:", font=FONT_BASE_BOLD, bg=C_BG, fg=C_TEXT)            .grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        self.e = InputText(form, "e.g. cabin.c (no path!)")
+        self.e.grid(row=0, column=1, sticky="ew", padx=(10, 10), pady=(0, 6))
+
+        def btn_grid(btn_row, btn_column):
+            return {"row": btn_row, "column": btn_column, "padx": (0, 0), "pady": (0, 6)}
         
-        # Button
-        def btn_grid(btn_row, btn_column): return {"row": btn_row, "column": btn_column, "padx": (6, 0), "pady": (10,0)}
-        Button(self, text="Browse…", command=self._browse, grid=btn_grid(1,2), tooltip="Choose the file")        
-        Button(self, text="Save", command=self._save, grid=btn_grid(2,2), tooltip="Save the file mapping")
-        
-        if self.file in self.data: self.e.insert(0, os.path.basename(self.data[self.file]))
-        
-        
-        
-    def _browse(self):
-        p = filedialog.askopenfilename(title="Select file")
-        if p: 
-            self.e.delete(0, tk.END); self.e.insert(0, os.path.basename(p))
-    def _save(self):
-        v = os.path.basename((self.e.get() or "").strip())
+        # Button(form, text="Open replacements folder", command=self._open_replacement_folder, grid=btn_grid(0, 2), tooltip="Open MOD/replacements/files (generate if missing)")
+
+        # Warning label under input (only when folder exists & not empty)
+        self._warn = tk.Label(form, text="", bg=C_BG, fg=C_ACCENT_RED, font=FONT_BASE_MINI,
+                              anchor="w", justify="left")
+        self._warn.grid(row=1, column=1, columnspan=2, sticky="w", padx=(10, 0), pady=(0, 0))
+
+        # Init from current data
+        cur = os.path.basename(self.data.get(self.file, "") or "").strip()
+        self.e.set_text(cur if cur else "")
+
+        # Live update + validation
+        def _live(_e=None):
+            self._set_mapping((self.e.get() or "").strip())
+            self._update_warning()
+
+        self.e.bind("<KeyRelease>", _live, add="+")
+        self.e.bind("<Return>", lambda e: (_live(), "break"), add="+")
+        self.e.bind("<FocusOut>", lambda e: _live(), add="+")
+
+        self._update_status()
+        self._update_warning()
+
+    # --- Core mapping ops ---
+    def _set_mapping(self, raw: str):
+        v = os.path.basename(raw or "").strip()
+
         if not v:
-            if self.file in self.data: del self.data[self.file]
+            if self.file in self.data:
+                try:
+                    del self.data[self.file]
+                except KeyError:
+                    pass
         else:
             self.data[self.file] = v
-        messagebox.showinfo("Saved", "Mapping updated."); _event_changed(self)
+
+        self._update_status()
+        _event_changed(self)
+
+    def _get_mapping(self) -> str:
+        return os.path.basename(self.data.get(self.file, "") or "").strip()
+
+    def _update_status(self):
+        rep = self._get_mapping()
+        if rep:
+            self._pill.configure(text="ACTIVE", bg=C_ACCENT_GREEN, fg="#0b1a10")
+            self.status_title.configure(text="Whole-file replacement is enabled")
+            self.status_sub.configure(
+                text=f"Replacement file: {rep}\n"
+                     "Note: only the filename is stored. Put the file into MOD/replacements/files/."
+            )
+        else:
+            self._pill.configure(text="NOT USED", bg=C_ACCENT_RED, fg="#1a0b0b")
+            self.status_title.configure(text="No replacement for this file")
+            self.status_sub.configure(
+                text="The vanilla file will be used.\n"
+                     "To enable replacement, type a filename that exists in MOD/replacements/files/."
+            )
+
+    # ---------- mod folder helpers ----------
+    def _repl_files_dir(self) -> Optional[Path]:
+        if not self.mod_dir:
+            return None
+        return self.mod_dir / "replacements" / "files"
+
+    def _list_repl_files(self, folder: Path) -> List[str]:
+        out: List[str] = []
+        try:
+            if not folder.exists() or not folder.is_dir():
+                return out
+            for root, _dirs, files in os.walk(str(folder)):
+                for fn in files:
+                    out.append(fn)
+        except Exception:
+            return []
+        return out
+
+    def _update_warning(self):
+        folder = self._repl_files_dir()
+        if not folder or not folder.exists():
+            self._warn.configure(text="")
+            return
+
+        names = self._list_repl_files(folder)
+        if not names:
+            self._warn.configure(text="")
+            return
+
+        v = os.path.basename((self.e.get() or "").strip())
+        if not v:
+            self._warn.configure(text="")
+            return
+
+        v_l = v.lower()
+        found = any(fn.lower() == v_l for fn in names)
+        self._warn.configure(text="" if found else f"⚠ File not found in: {folder}")
+
+    # --- Button ---
+    def _open_replacement_folder(self):
+        folder = self._repl_files_dir()
+        if not folder:
+            messagebox.showwarning(
+                "Open replacements folder",
+                "No mod directory was provided to this editor.\n\n"
+                "(Caller should pass mod_dir=... when opening the sheet.)"
+            )
+            return
+
+        if not folder.exists():
+            ok = messagebox.askyesno(
+                "Generate folder?",
+                f"Folder does not exist:\n\n{folder}\n\nGenerate it now?"
+            )
+            if not ok:
+                return
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror(
+                    "Generate failed",
+                    f"Couldn't create folder:\n\n{folder}\n\n{e}"
+                )
+                return
+
+        try:
+            FileManagement.Open(folder, title="Open replacements folder")
+        except Exception:
+            try:
+                os.startfile(str(folder))  # type: ignore[attr-defined]
+            except Exception:
+                messagebox.showwarning("Open failed", f"Couldn't open:\n\n{folder}")
+
+        self._update_warning()
+
+    # --- Global-save integration ---
+    def flush_current(self):
+        self._set_mapping((self.e.get() or "").strip())
+        self._update_warning()
+
 
 
 def _summarize_line_repl(d):
@@ -1657,8 +2363,9 @@ def _pretty_block_for_editor(s: Any) -> str:
 
 # ====== Public factory (window) ======
 
-def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_save=None, game_root: Optional[Union[str, Path]] = None):
-    working = payload    
+def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_save=None, game_root: Optional[Union[str, Path]] = None, mod_dir: Optional[Union[str, Path]] = None):
+    working = payload
+    mod_dir_p = Path(mod_dir) if mod_dir else None
     
     def _resolve_file_key(d: dict, fpath: str) -> str:
         import os
@@ -1703,10 +2410,20 @@ def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_sav
         abs_path = (game_root / fpath).resolve()
         FileManagement.OpenParentDir(abs_path, title="Open")
             
+    # --- Layout ---
+    win.grid_rowconfigure(0, weight=1)   # notebook grows/shrinks
+    win.grid_rowconfigure(1, weight=0)   # bottom bar is fixed
+    win.grid_columnconfigure(0, weight=1)
+
     nb_wrap = tk.Frame(win, bg=C_BG)
-    nb_wrap.pack(fill="both", expand=True, padx=8, pady=8)
+    nb_wrap.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
     nb = ttk.Notebook(nb_wrap)
     nb.pack(fill="both", expand=True)
+
+    # Save / Cancel bar (always visible)
+    bar = ttk.Frame(win)
+    bar.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
 
 
     # Place a small widget on the same row as the notebook tabs (top-right)
@@ -1729,12 +2446,11 @@ def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_sav
             txt.configure(state="disabled")
             nb.add(holder, text=f"{title} (error)")
 
-    add_tab(lambda p: EditorLineRepl(p,           working["LINE_REPLACEMENTS"],     fkey_line), "Function lines")
-    add_tab(lambda p: EditorFunctionMappings(p,   working["FUNCTION_REPLACEMENTS"], fkey_fun),  "Functions")
+    add_tab(lambda p: EditorLineRepl(p, working["LINE_REPLACEMENTS"], fkey_line, funmap=working["FUNCTION_REPLACEMENTS"], funmap_file_key=fkey_fun), "Function lines")
+    add_tab(lambda p: EditorFunctionMappings(p, working["FUNCTION_REPLACEMENTS"], fkey_fun, linemap=working["LINE_REPLACEMENTS"], linemap_file_key=fkey_line), "Functions")
     add_tab(lambda p: EditorGeneralPairs(p,       working["FILE_LINE_REPLACEMENTS"],fkey_gen),  "General lines")
     add_tab(lambda p: EditorAdditions(p,          working["FILE_ADDITIONS"],        fkey_add),  "Additions")
-    add_tab(lambda p: EditorFileMap(p,            working["FILE_REPLACEMENTS"],     fkey_file), "Files")
-
+    add_tab(lambda p: EditorFileMap(p, working["FILE_REPLACEMENTS"], fkey_file, mod_dir_p), "Files")
 
 
 
@@ -1793,14 +2509,10 @@ def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_sav
     win.bind("<Control-y>", _on_redo)
     win.bind("<Control-Shift-Z>", _on_redo)
     win.bind("<Up>", _on_up)
-    win.bind("<Down>", _on_down)
+    win.bind("<Down>", _on_down)  
     
     
-
     # Save / Cancel
-    bar = ttk.Frame(win); bar.pack(fill="x", padx=8, pady=(0,8))
-
-
 
     def _is_blank(v):
         if v is None: return True
@@ -1972,16 +2684,3 @@ def open_edit_sheet(parent: tk.Misc, payload: Dict[str, Any], fpath: str, on_sav
     win.after_idle(lambda: win.focus_set())
     
     
-
-
-def flush_current(self):
-    v = os.path.basename((self.e.get() or "").strip())
-    if not v:
-        if self.file in self.data:
-            try:
-                del self.data[self.file]
-            except KeyError:
-                pass
-    else:
-        self.data[self.file] = v
-
